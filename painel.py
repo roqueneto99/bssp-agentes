@@ -652,7 +652,16 @@ async def invalidar_cache(
 
 @app.post("/api/cache/preload/{seg_id}")
 async def preload_cache(seg_id: int):
-    """Inicia pre-carga do cache em background. Retorna imediatamente."""
+    """
+    Pre-carga de cache de segmentacao da API do RD Station.
+
+    No modo DATABASE (padrao em producao), esse cache e desnecessario —
+    as consultas vao direto ao PostgreSQL. Retornamos no-op para nao
+    gastar rate limit da API.
+    """
+    if DATA_MODE == "database":
+        return {"status": "skipped", "reason": "modo database ativo"}
+
     cached = _seg_cache.get(str(seg_id))
     if cached and (time.time() - cached["ts"]) < CACHE_TTL:
         return {
