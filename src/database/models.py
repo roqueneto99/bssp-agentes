@@ -152,3 +152,36 @@ class Execucao(Base):
 
     def __repr__(self) -> str:
         return f"<Execucao {self.email} {self.tipo} {self.timestamp}>"
+
+
+class SyncLog(Base):
+    """
+    Auditoria de sincronizacoes RD Station -> PostgreSQL.
+
+    Cada chamada a full_sync() ou incremental_sync() grava uma linha:
+    started_at na criacao, finished_at + status + totais ao terminar.
+    """
+
+    __tablename__ = "sync_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tipo: Mapped[str] = mapped_column(String(32), nullable=False)
+    # tipo: "full" ou "incremental"
+
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    total_pages: Mapped[int] = mapped_column(Integer, default=0)
+    total_contacts: Mapped[int] = mapped_column(Integer, default=0)
+    new_contacts: Mapped[int] = mapped_column(Integer, default=0)
+    updated_contacts: Mapped[int] = mapped_column(Integer, default=0)
+    errors: Mapped[int] = mapped_column(Integer, default=0)
+
+    status: Mapped[str] = mapped_column(String(16), default="running")
+    # status: "running", "completed", "failed"
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+
+    def __repr__(self) -> str:
+        return f"<SyncLog {self.tipo} {self.status} {self.started_at}>"
