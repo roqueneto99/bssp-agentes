@@ -1,0 +1,22 @@
+# BSSP Agentes — Dependências de produção
+# Python 3.11+
+
+# --- Web framework (painel.py) ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# --- HTTP client async (RD Station / Hablla) ---
+httpx==0.28.1
+
+# --- Validação ---
+pydantic==2.10.4
+
+# --- Database ---
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+
+# --- Observabilidade ---
+structlog==24.4.0
+
+# --- Env ---
+python-dotenv==1.0.1
