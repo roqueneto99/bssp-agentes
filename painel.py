@@ -88,12 +88,33 @@ async def _provisionar_custom_fields(rd: RDStationClient) -> None:
 @app.on_event("startup")
 async def startup():
     global rdstation, llm, orchestrator, hablla, pipeline, DATA_MODE
-    rdstation = RDStationClient(
-        client_id=os.getenv("RDSTATION_CLIENT_ID", ""),
-        client_secret=os.getenv("RDSTATION_CLIENT_SECRET", ""),
-        refresh_token=os.getenv("RDSTATION_REFRESH_TOKEN", ""),
-        plan=os.getenv("RDSTATION_PLAN", "pro"),
-    )
+
+    # --- RD Station (tolerante: se faltar credencial, segue sem o client) ---
+    rd_client_id = os.getenv("RDSTATION_CLIENT_ID", "")
+    rd_client_secret = os.getenv("RDSTATION_CLIENT_SECRET", "")
+    rd_refresh_token = os.getenv("RDSTATION_REFRESH_TOKEN", "")
+
+    if rd_client_id and rd_client_secret:
+        try:
+            rdstation = RDStationClient(
+                client_id=rd_client_id,
+                client_secret=rd_client_secret,
+                refresh_token=rd_refresh_token,
+                plan=os.getenv("RDSTATION_PLAN", "pro"),
+            )
+            logger.info("RDStationClient inicializado (modo OAuth)")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Falha ao inicializar RDStationClient: %s", exc)
+            rdstation = None
+    else:
+        logger.warning(
+            "Credenciais RD Station ausentes "
+            "(RDSTATION_CLIENT_ID / RDSTATION_CLIENT_SECRET) — "
+            "painel subirá em modo degradado, sem sync novo."
+        )
+        rdstation = None
+
+    # --- LLM ---
     llm_key = os.getenv("LLM_API_KEY", "")
     llm = LLMProvider(
         provider="anthropic",
@@ -101,7 +122,14 @@ async def startup():
         model="claude-sonnet-4-20250514",
         temperature=0.2,
     )
-    orchestrator = Squad1Orchestrator(llm=llm, rdstation=rdstation)
+    if not llm_key:
+        logger.warning("LLM_API_KEY ausente — agentes rodarão com provider dummy")
+
+    # --- Orquestradores (só se rdstation existir) ---
+    if rdstation is not None:
+        orchestrator = Squad1Orchestrator(llm=llm, rdstation=rdstation)
+    else:
+        orchestrator = None
 
     # Hablla (opcional — só inicializa se token configurado)
     hablla_token = os.getenv("HABLLA_API_TOKEN", "")
@@ -115,11 +143,16 @@ async def startup():
         logger.warning("HABLLA_API_TOKEN não configurado — Squad 2 rodará sem dados Hablla")
 
     # Pipeline completo (Squad 1 → Squad 2 → ...)
-    pipeline = AgentPipeline(llm=llm, rdstation=rdstation, hablla=hablla)
-    logger.info("AgentPipeline inicializado")
+    if rdstation is not None:
+        pipeline = AgentPipeline(llm=llm, rdstation=rdstation, hablla=hablla)
+        logger.info("AgentPipeline inicializado")
+    else:
+        pipeline = None
+        logger.warning("Pipeline não inicializado — RD Station ausente")
 
-    # Provisionar custom fields no RD Station (background)
-    asyncio.create_task(_provisionar_custom_fields(rdstation))
+    # Provisionar custom fields no RD Station (background, só se client existe)
+    if rdstation is not None:
+        asyncio.create_task(_provisionar_custom_fields(rdstation))
 
     # Detectar modo: DATABASE se DATABASE_URL configurado
     db_url = os.getenv("DATABASE_URL", "")
