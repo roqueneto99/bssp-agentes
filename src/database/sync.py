@@ -105,6 +105,15 @@ async def _upsert_leads(session, leads_data: list[dict]) -> tuple[int, int]:
     if not valid:
         return 0, 0
 
+    # Deduplicar por email no batch. A API do RD Station retorna o mesmo
+    # contato em paginas diferentes; sem dedup, o Postgres aborta o chunk
+    # inteiro com "ON CONFLICT DO UPDATE command cannot affect row a second time".
+    # Mantem o ultimo visto (mais recente na paginacao).
+    deduped: dict[str, dict] = {}
+    for d in valid:
+        deduped[d["email"]] = d
+    valid = list(deduped.values())
+
     stmt = pg_insert(Lead).values(valid)
 
     # ON CONFLICT (email) DO UPDATE — atualiza todos os campos relevantes
