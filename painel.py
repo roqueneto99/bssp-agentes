@@ -420,199 +420,79 @@ async def listar_leads(
     classificacao: str = Query(default=""),
 ):
     """
-    Busca leads.
+    Busca leads. Sempre le do banco local (PostgreSQL).
 
-    Modo DATABASE: consulta PostgreSQL local (instantâneo).
-    Modo API (fallback): consulta diretamente o RD Station.
+    Se o banco estiver indisponivel, retorna 503 — nao ha fallback
+    automatico para a API do RD Station (por decisao de arquitetura).
     """
-    # --- MODO DATABASE ---
-    if DATA_MODE == "database":
-        try:
-            from src.database.queries import list_leads as db_list_leads
-            # Mapear date_field do frontend para coluna do banco
-            db_date_field = "rd_created_at" if date_field == "created_at" else date_field
-            result = await db_list_leads(
-                page=page,
-                page_size=page_size,
-                search=search,
-                date_from=date_from,
-                date_to=date_to,
-                date_field=db_date_field,
-                temperatura=temperatura,
-                classificacao=classificacao,
-            )
-            # Enriquecer com status de running
-            for c in result["contacts"]:
-                c["_squad1_running"] = c.get("email", "") in running_leads
-                # Merge com execuções em memória (se ainda não persistidas no DB)
-                em = c.get("email", "")
-                if not c.get("_last_exec"):
-                    for ex in reversed(execucoes):
-                        if ex.get("email") == em:
-                            c["_last_exec"] = ex
-                            break
-            return result
-        except Exception as e:
-            logger.error("Erro ao consultar PostgreSQL: %s", e)
-            logger.warning("Tentando fallback para API...")
-            # Fall through para modo API
+    if DATA_MODE != "database":
+        raise HTTPException(
+            503,
+            "PostgreSQL indisponivel. Verifique DATABASE_URL e reinicie o servico."
+        )
 
-    # --- MODO API (original) ---
     try:
-        segs = await rdstation.list_segmentations()
-        segmentation_id, seg_name = _resolve_seg(segs, segmentation_id)
-
-        if segmentation_id is None:
-            return {"contacts": [], "page": 1, "page_size": page_size,
-                    "received": 0, "has_next": False, "has_prev": False,
-                    "segmentation_name": "Nenhuma", "mode": "empty"}
-
-        has_date_filter = bool(date_from or date_to)
-
-        # ---------------------------------------------------------
-        # MODE 1: No date filter — direct 1:1 API pagination
-        # ---------------------------------------------------------
-        if not has_date_filter:
-            data = await rdstation.get_segmentation_contacts(
-                segmentation_id,
-                page=page,
-                page_size=page_size,
-                search=search if search else None,
-            )
-            contacts = []
-            if isinstance(data, dict):
-                contacts = data.get("contacts", [])
-            elif isinstance(data, list):
-                contacts = data
-
-            received = len(contacts)
-            has_next = received >= page_size
-
-            logger.info(
-                "Seg %s | pag %d | %d leads | has_next=%s",
-                segmentation_id, page, received, has_next,
-            )
-
-            _enrich_contacts(contacts)
-            return {
-                "contacts": contacts,
-                "page": page,
-                "page_size": page_size,
-                "received": received,
-                "has_next": has_next,
-                "has_prev": page > 1,
-                "segmentation_id": segmentation_id,
-                "segmentation_name": seg_name,
-                "mode": "direct",
-            }
-
-        # ---------------------------------------------------------
-        # MODE 2: Date filter — CACHE + filtro em Python
-        # ---------------------------------------------------------
-        # A API do RD Station NAO suporta filtro por data nem
-        # ordenacao confiavel. Estrategia:
-        #
-        # 1. Carrega TODOS os contatos da segmentacao em cache
-        #    (burst paralelo — 120 tokens disponiveis, ~80 paginas)
-        # 2. Filtra por data e busca em Python (instantaneo)
-        # 3. Cache expira apos 10 min (CACHE_TTL)
-        #
-        # Primeira carga: ~3-10s (burst de API).
-        # Cargas subsequentes: instantaneas (cache hit).
-
-        if date_field not in ("created_at", "last_conversion_date"):
-            date_field = "created_at"
-
-        logger.info(
-            "Filtro data: %s a %s | campo=%s | seg %s",
-            date_from or "*", date_to or "*", date_field, segmentation_id,
+        from src.database.queries import list_leads as db_list_leads
+        # Mapear date_field do frontend para coluna do banco
+        db_date_field = "rd_created_at" if date_field == "created_at" else date_field
+        result = await db_list_leads(
+            page=page,
+            page_size=page_size,
+            search=search,
+            date_from=date_from,
+            date_to=date_to,
+            date_field=db_date_field,
+            temperatura=temperatura,
+            classificacao=classificacao,
         )
-
-        # Buscar todos os contatos (com cache)
-        all_contacts = await _build_seg_cache(segmentation_id)
-
-        # Filtrar por data
-        matched = [
-            c for c in all_contacts
-            if _contact_matches_date(c, date_from, date_to, date_field)
-        ]
-
-        # Filtrar por busca textual (se houver)
-        if search:
-            search_lower = search.lower()
-            matched = [
-                c for c in matched
-                if search_lower in (c.get("name") or "").lower()
-                or search_lower in (c.get("email") or "").lower()
-            ]
-
-        # Ordenar por data (mais recente primeiro)
-        def _sort_key(c):
-            raw = c.get(date_field) or c.get("created_at") or ""
-            return raw[:10] if raw else "0000-00-00"
-        matched.sort(key=_sort_key, reverse=True)
-
-        # Paginar
-        total_matched = len(matched)
-        skip = (page - 1) * page_size
-        page_contacts = matched[skip:skip + page_size]
-        has_next = total_matched > skip + page_size
-
-        cache_info = _seg_cache.get(str(segmentation_id), {})
-
-        logger.info(
-            "Filtro data resultado: %d/%d matches, pagina %d = %d leads, has_next=%s",
-            total_matched, len(all_contacts), page, len(page_contacts), has_next,
-        )
-
-        _enrich_contacts(page_contacts)
-        return {
-            "contacts": page_contacts,
-            "page": page,
-            "page_size": page_size,
-            "received": len(page_contacts),
-            "total_matched": total_matched,
-            "total_cached": len(all_contacts),
-            "total_base": cache_info.get("total_rows", len(all_contacts)),
-            "has_next": has_next,
-            "has_prev": page > 1,
-            "segmentation_id": segmentation_id,
-            "segmentation_name": seg_name,
-            "mode": "date_filter",
-            "cache_pages": cache_info.get("pages", 0),
-            "cache_age_s": round(time.time() - cache_info.get("ts", time.time())),
-        }
+        # Enriquecer com status de running
+        for c in result["contacts"]:
+            c["_squad1_running"] = c.get("email", "") in running_leads
+            # Merge com execucoes em memoria (se ainda nao persistidas no DB)
+            em = c.get("email", "")
+            if not c.get("_last_exec"):
+                for ex in reversed(execucoes):
+                    if ex.get("email") == em:
+                        c["_last_exec"] = ex
+                        break
+        return result
     except Exception as e:
-        logger.error("Erro ao listar leads: %s", e)
-        raise HTTPException(500, str(e))
+        logger.error("Erro ao consultar PostgreSQL: %s", e)
+        raise HTTPException(503, "Erro ao consultar banco: %s" % e)
 
 
 @app.get("/api/lead/{email}")
 async def detalhe_lead(email: str):
-    # Modo DATABASE
-    if DATA_MODE == "database":
-        try:
-            from src.database.queries import get_lead_detail
-            result = await get_lead_detail(email)
-            if result:
-                # Merge com execuções em memória
-                mem_hist = [ex for ex in execucoes if ex.get("email") == email]
-                if mem_hist:
-                    result["execucoes"] = mem_hist + result.get("execucoes", [])
-                return result
-        except Exception as e:
-            logger.warning("Erro ao buscar lead no DB, tentando API: %s", e)
+    """
+    Detalhes de um lead. Sempre le do banco local.
 
-    # Modo API (ou fallback)
+    Se o lead nao estiver na base (ex: criado no RD apos o ultimo sync),
+    retorna 404 explicito. Use o sync incremental para trazer leads novos.
+    """
+    if DATA_MODE != "database":
+        raise HTTPException(
+            503,
+            "PostgreSQL indisponivel. Verifique DATABASE_URL e reinicie o servico."
+        )
+
     try:
-        contact = await rdstation.get_contact(email=email)
-        data = contact.to_api_payload()
-        data["uuid"] = contact.uuid
-        data["legal_bases"] = [lb.to_dict() for lb in contact.legal_bases]
-        hist = [ex for ex in execucoes if ex.get("email") == email]
-        return {"contact": data, "execucoes": hist}
+        from src.database.queries import get_lead_detail
+        result = await get_lead_detail(email)
+        if not result:
+            raise HTTPException(
+                404,
+                "Lead nao encontrado no banco. Pode ter sido criado apos o ultimo sync."
+            )
+        # Merge com execucoes em memoria (ainda nao persistidas no DB)
+        mem_hist = [ex for ex in execucoes if ex.get("email") == email]
+        if mem_hist:
+            result["execucoes"] = mem_hist + result.get("execucoes", [])
+        return result
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(500, str(e))
+        logger.error("Erro ao buscar lead no DB: %s", e)
+        raise HTTPException(503, "Erro ao consultar banco: %s" % e)
 
 
 @app.post("/api/squad1/executar/{email}")
