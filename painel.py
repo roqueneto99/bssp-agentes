@@ -411,7 +411,7 @@ async def _preload_cache_background(seg_id: int):
 async def listar_leads(
     segmentation_id: int = Query(default=0),
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=125, ge=25, le=125),
+    page_size: int = Query(default=125, ge=25, le=500),
     search: str = Query(default=""),
     date_from: str = Query(default=""),
     date_to: str = Query(default=""),

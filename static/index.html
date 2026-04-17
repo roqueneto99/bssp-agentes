@@ -131,7 +131,10 @@ td .conv-date{font-size:11px;color:#64748b;margin-top:2px}
 <body>
 
 <div class="header">
-  <h1>BSSP &#8212; <span>Squad Leads</span></h1>
+  <div>
+    <h1>BSSP &#8212; <span>Squad Leads</span></h1>
+    <div id="dbInfo" style="font-size:12px;color:#94a3b8;margin-top:4px">Carregando base...</div>
+  </div>
   <div class="header-right">
     <select id="segSelect"></select>
     <button class="btn btn-primary" id="btnRefresh">&#8635; Atualizar</button>
@@ -173,6 +176,9 @@ td .conv-date{font-size:11px;color:#64748b;margin-top:2px}
         <option value="50">50</option>
         <option value="100">100</option>
         <option value="125" selected>125</option>
+        <option value="200">200</option>
+        <option value="300">300</option>
+        <option value="500">500</option>
       </select>
       <button class="btn btn-sm btn-primary" id="btnFilter">Filtrar</button>
       <button class="btn btn-sm btn-outline" id="btnClear">Limpar</button>
@@ -379,8 +385,38 @@ td .conv-date{font-size:11px;color:#64748b;margin-top:2px}
 
   // --- Init ---
   async function init() {
+    loadDbInfo();
     await loadSegmentations();
     await loadLeads();
+  }
+
+  async function loadDbInfo() {
+    try {
+      var res = await fetch("/api/db/stats");
+      var s = await res.json();
+      var el = document.getElementById("dbInfo");
+      if (!el) return;
+      var total = (s.total_leads || 0).toLocaleString("pt-BR");
+      var modo = s.mode === "database" ? "database" : "api";
+      var cor = s.mode === "database" ? "#22c55e" : "#f59e0b";
+      var last = "";
+      if (s.last_sync && s.last_sync.finished_at) {
+        var dt = new Date(s.last_sync.finished_at);
+        var dia = String(dt.getDate()).padStart(2,"0");
+        var mes = String(dt.getMonth()+1).padStart(2,"0");
+        var hh = String(dt.getHours()).padStart(2,"0");
+        var mm = String(dt.getMinutes()).padStart(2,"0");
+        last = " &middot; &#250;ltimo sync: " + dia + "/" + mes + " " + hh + ":" + mm;
+      } else {
+        last = " &middot; sem sync registrado";
+      }
+      el.innerHTML = "Base: <b style='color:#e2e8f0'>" + total + "</b> leads"
+        + " &middot; modo: <b style='color:" + cor + "'>" + modo + "</b>"
+        + last;
+    } catch (e) {
+      var el = document.getElementById("dbInfo");
+      if (el) el.textContent = "Base: (indispon\u00edvel)";
+    }
   }
 
   async function loadSegmentations() {
