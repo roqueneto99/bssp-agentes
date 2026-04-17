@@ -163,12 +163,12 @@ td .conv-date{font-size:11px;color:#64748b;margin-top:2px}
         <option value="last_conversion_date">&#218;ltima convers&#227;o</option>
       </select>
       <label>De:</label>
-      <input type="date" id="dateFrom">
+      <input type="date" id="dateFrom" autocomplete="off">
       <label>At&#233;:</label>
-      <input type="date" id="dateTo">
+      <input type="date" id="dateTo" autocomplete="off">
       <span class="filter-note" id="dateNote"></span>
       <div class="filter-sep"></div>
-      <input type="text" id="searchInput" placeholder="Buscar nome ou email..." style="min-width:200px">
+      <input type="text" id="searchInput" placeholder="Buscar nome ou email..." style="min-width:200px" autocomplete="off">
       <div class="filter-sep"></div>
       <label>Por p&#225;gina:</label>
       <select id="pageSizeSelect">
@@ -385,6 +385,11 @@ td .conv-date{font-size:11px;color:#64748b;margin-top:2px}
 
   // --- Init ---
   async function init() {
+    // Limpa os inputs de data para evitar autofill do navegador (Chrome
+    // as vezes preenche com data arbitraria, disparando filtros nao pedidos).
+    dateFrom.value = "";
+    dateTo.value = "";
+    searchInput.value = "";
     loadDbInfo();
     await loadSegmentations();
     await loadLeads();
@@ -617,7 +622,13 @@ td .conv-date{font-size:11px;color:#64748b;margin-top:2px}
   }
 
   function renderStats(contacts) {
-    document.getElementById("statSegName").textContent = lastData.segmentation_name || "--";
+    // Nome da segmentacao: prefere o que vem do backend (modo API), se nao,
+    // usa o texto do option selecionado no dropdown (modo database).
+    var segName = lastData.segmentation_name;
+    if (!segName && segSelect.selectedOptions && segSelect.selectedOptions[0]) {
+      segName = segSelect.selectedOptions[0].textContent;
+    }
+    document.getElementById("statSegName").textContent = segName || "--";
     document.getElementById("statPageInfo").textContent = lastData.page || "--";
     document.getElementById("statPageCount").textContent = contacts.length;
 

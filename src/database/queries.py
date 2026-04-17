@@ -62,13 +62,34 @@ async def list_leads(
                 )
             )
 
+        # Datas: convertem string "YYYY-MM-DD" para datetime antes de comparar.
+        # Sem isso o Postgres rejeita: "operator does not exist:
+        # timestamp with time zone >= character varying".
+        def _parse_date(s: str, end_of_day: bool = False) -> Optional[datetime]:
+            try:
+                # Aceita "YYYY-MM-DD" ou ISO completo
+                s = s.strip()
+                if not s:
+                    return None
+                if "T" in s:
+                    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+                if end_of_day:
+                    return datetime.fromisoformat(s + "T23:59:59+00:00")
+                return datetime.fromisoformat(s + "T00:00:00+00:00")
+            except Exception:
+                return None
+
         if date_from:
-            col = getattr(Lead, date_field, Lead.rd_created_at)
-            conditions.append(col >= date_from)
+            df = _parse_date(date_from)
+            if df is not None:
+                col = getattr(Lead, date_field, Lead.rd_created_at)
+                conditions.append(col >= df)
 
         if date_to:
-            col = getattr(Lead, date_field, Lead.rd_created_at)
-            conditions.append(col <= date_to + "T23:59:59")
+            dt = _parse_date(date_to, end_of_day=True)
+            if dt is not None:
+                col = getattr(Lead, date_field, Lead.rd_created_at)
+                conditions.append(col <= dt)
 
         if temperatura:
             conditions.append(Lead.s1_temperatura == temperatura)
