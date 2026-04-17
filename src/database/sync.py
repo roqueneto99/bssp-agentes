@@ -171,7 +171,7 @@ async def full_sync(seg_id: Optional[int] = None) -> dict:
 
     stats = {
         "tipo": "full",
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": datetime.now(timezone.utc),
         "total_pages": 0,
         "total_contacts": 0,
         "new_contacts": 0,
@@ -228,16 +228,20 @@ async def full_sync(seg_id: Optional[int] = None) -> dict:
 
             batch_leads = []
             batch_done = False
+            empty_pages_in_batch = 0
             for i, contacts in enumerate(results):
                 if not contacts:
-                    if i == 0:  # Primeira página vazia = fim
-                        batch_done = True
+                    empty_pages_in_batch += 1
                     stats["errors"] += 1
                     continue
                 batch_leads.extend(_contact_to_lead_dict(c) for c in contacts)
                 stats["total_contacts"] += len(contacts)
-                if len(contacts) < PAGE_SIZE:
-                    batch_done = True
+
+            # So encerra se TODAS as paginas do batch vieram vazias
+            # (paginas com <125 leads nao significam fim — API devolve irregular).
+            # Criterio de parada real: page_num > total_pages no while.
+            if empty_pages_in_batch == len(results):
+                batch_done = True
 
             # Upsert batch inteiro
             if batch_leads:
@@ -267,7 +271,7 @@ async def full_sync(seg_id: Optional[int] = None) -> dict:
 
             page_num = end_page
 
-        stats["finished_at"] = datetime.now(timezone.utc).isoformat()
+        stats["finished_at"] = datetime.now(timezone.utc)
         stats["status"] = "completed"
         total_time = time.time() - t0
 
@@ -346,7 +350,7 @@ async def incremental_sync(
         "tipo": "incremental",
         "since_hours": since_hours,
         "cutoff": cutoff_str,
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": datetime.now(timezone.utc),
         "total_pages": 0,
         "total_contacts": 0,
         "new_contacts": 0,
@@ -398,7 +402,7 @@ async def incremental_sync(
 
             page += 1
 
-        stats["finished_at"] = datetime.now(timezone.utc).isoformat()
+        stats["finished_at"] = datetime.now(timezone.utc)
         stats["status"] = "completed"
 
         logger.info("=" * 60)
