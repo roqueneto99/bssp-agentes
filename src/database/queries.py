@@ -200,14 +200,19 @@ async def get_lead_detail(email: str) -> Optional[dict]:
 
         contact = _lead_to_contact(lead)
 
-        # Buscar histórico de execuções
+        # Buscar histórico de execuções.
+        # Buscamos as 20 mais recentes (DESC) e depois revertemos para ASC
+        # (mais antiga primeiro, mais recente por ultimo). O frontend
+        # consome essa lista pegando o ultimo elemento como "execução
+        # mais recente" — ordenar ASC garante que re-executar o score
+        # atualize a sidebar imediatamente.
         exec_result = await session.execute(
             select(Execucao)
             .where(Execucao.email == email.lower().strip())
             .order_by(desc(Execucao.timestamp))
             .limit(20)
         )
-        execs = exec_result.scalars().all()
+        execs = list(reversed(exec_result.scalars().all()))
 
         hist = []
         for ex in execs:

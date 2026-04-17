@@ -483,10 +483,19 @@ async def detalhe_lead(email: str):
                 404,
                 "Lead nao encontrado no banco. Pode ter sido criado apos o ultimo sync."
             )
-        # Merge com execucoes em memoria (ainda nao persistidas no DB)
+        # Merge com execucoes em memoria (ainda nao persistidas no DB).
+        # DB vem ordenado ASC (mais antiga -> mais recente).
+        # Memoria tambem esta em ordem cronologica (append order).
+        # Deduplica por timestamp para evitar duplicar a execucao mais
+        # recente (que fica em ambos quando save_execution roda com sucesso)
+        # e concatena mem no FINAL para preservar a garantia "ultimo
+        # elemento = execucao mais recente".
         mem_hist = [ex for ex in execucoes if ex.get("email") == email]
         if mem_hist:
-            result["execucoes"] = mem_hist + result.get("execucoes", [])
+            db_execs = result.get("execucoes", [])
+            db_timestamps = {ex.get("timestamp") for ex in db_execs if ex.get("timestamp")}
+            new_from_mem = [ex for ex in mem_hist if ex.get("timestamp") not in db_timestamps]
+            result["execucoes"] = db_execs + new_from_mem
         return result
     except HTTPException:
         raise

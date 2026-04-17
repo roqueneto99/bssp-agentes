@@ -821,7 +821,17 @@ td .conv-date{font-size:11px;color:#64748b;margin-top:2px}
       html += '</button></div>';
 
       if (execs.length) {
-        var last = execs[execs.length-1];
+        // Pega a execucao mais recente por timestamp (robusto contra
+        // qualquer ordem que o backend retorne). Antes usavamos
+        // execs[execs.length-1], o que pegava a execucao mais antiga
+        // quando o DB vinha em ordem DESC — causando a sidebar a nao
+        // atualizar ao re-executar o score.
+        var last = execs[0];
+        for (var xi = 1; xi < execs.length; xi++) {
+          var ts = execs[xi].timestamp;
+          var lastTs = last.timestamp;
+          if (ts && (!lastTs || ts > lastTs)) last = execs[xi];
+        }
         var r = last.resumo || last.resumo_squad1 || {};
         var ag = last.agentes || {};
 
