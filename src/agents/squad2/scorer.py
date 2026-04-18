@@ -260,19 +260,29 @@ class ScorerAgent:
         else:
             partes.append("sem interacoes recentes")
 
-        # Velocidade de progressão (múltiplas conversões recentes)
-        total_conv = 0
+        # Velocidade de progressão (conversoes RECENTES — ultimos 30/90d).
+        # Antes o codigo usava total_conversoes cumulativo, o que
+        # classificava como "alta velocidade" um lead com 15 conversoes
+        # historicas sem atividade recente. Velocidade = movimento real
+        # no funil, nao historia.
         if perfil_squad1:
-            total_conv = perfil_squad1.get("metricas_engajamento", {}).get("total_conversoes", 0)
-            if total_conv >= 5:
+            metricas = perfil_squad1.get("metricas_engajamento", {}) or {}
+            conv_30d = metricas.get("conversoes_ultimos_30d", 0) or 0
+            conv_90d = metricas.get("conversoes_ultimos_90d", 0) or 0
+            total_conv = metricas.get("total_conversoes", 0) or 0
+            dias_ult = metricas.get("dias_desde_ultima_conversao")
+
+            if conv_30d >= 3:
                 score += 25
-                partes.append(f"alta velocidade no funil ({total_conv} conversoes)")
-            elif total_conv >= 3:
+                partes.append(f"alta velocidade ({conv_30d} conversoes em 30 dias)")
+            elif conv_30d >= 1:
                 score += 15
-                partes.append(f"{total_conv} conversoes (velocidade moderada)")
-            elif total_conv >= 1:
-                score += 5
-                partes.append(f"{total_conv} conversao(s) registradas")
+                partes.append(f"{conv_30d} conversao(s) nos ultimos 30 dias")
+            elif conv_90d >= 1:
+                score += 8
+                partes.append(f"{conv_90d} conversao(s) nos ultimos 90 dias")
+            elif total_conv >= 1 and dias_ult is not None:
+                partes.append(f"{total_conv} conversao(s) historicas (ultima ha {dias_ult}d)")
             else:
                 partes.append("sem conversoes registradas")
 
@@ -292,7 +302,8 @@ class ScorerAgent:
         """
         Gera uma razao textual para o score de engajamento.
         O score em si vem do Analisador de Engajamento (ja determinístico);
-        aqui so explicamos o que contribuiu para ele.
+        aqui so explicamos o que contribuiu para ele, separando
+        historico (total) de atividade recente.
         """
         if not engajamento and not perfil_squad1:
             return "Sem dados de engajamento disponiveis."
@@ -301,7 +312,6 @@ class ScorerAgent:
 
         sub = (engajamento or {}).get("scores", {}) or {}
         canais = (engajamento or {}).get("canais_ativos", []) or []
-        rd = (engajamento or {}).get("rd", {}) or {}
         hablla = (engajamento or {}).get("hablla", {}) or {}
 
         # Visao geral pelo score
@@ -314,16 +324,26 @@ class ScorerAgent:
         else:
             partes.append("engajamento minimo")
 
-        # Volume e multicanalidade
+        # Multicanalidade
         if canais:
             partes.append(f"{len(canais)} canal(is): {', '.join(canais)}")
 
-        # Conversoes / interacoes RD
+        # Conversoes — separar TOTAL x RECENTE
         total_conv = 0
+        conv_30d = 0
+        dias_ult = None
         if perfil_squad1:
-            total_conv = perfil_squad1.get("metricas_engajamento", {}).get("total_conversoes", 0) or 0
-        if total_conv:
-            partes.append(f"{total_conv} conversao(s) no RD Station")
+            metricas = perfil_squad1.get("metricas_engajamento", {}) or {}
+            total_conv = metricas.get("total_conversoes", 0) or 0
+            conv_30d = metricas.get("conversoes_ultimos_30d", 0) or 0
+            dias_ult = metricas.get("dias_desde_ultima_conversao")
+
+        if conv_30d > 0:
+            partes.append(f"{conv_30d} conversao(s) em 30 dias ({total_conv} no total)")
+        elif total_conv > 0 and dias_ult is not None:
+            partes.append(f"{total_conv} conversao(s) historicas (ultima ha {dias_ult}d)")
+        elif total_conv > 0:
+            partes.append(f"{total_conv} conversao(s) no historico")
 
         # Dados Hablla
         total_msgs = hablla.get("total_msgs_recebidas_do_lead", 0) or 0
@@ -333,9 +353,9 @@ class ScorerAgent:
         if cards_abertos:
             partes.append(f"{cards_abertos} card(s) ativo(s)")
 
-        # Sinais de alerta
-        if sub.get("recencia", 0) <= 15:
-            partes.append("sem interacoes nas ultimas semanas")
+        # Sinais de alerta so se RECENCIA baixa E nao ha atividade recente
+        if sub.get("recencia", 0) <= 15 and conv_30d == 0:
+            partes.append("sem interacoes recentes")
         if sub.get("responsividade", 0) == 0 and total_msgs:
             partes.append("lead nao respondeu mensagens")
 

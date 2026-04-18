@@ -160,6 +160,33 @@ Responda APENAS com JSON:
         # --- 1. Normalizar dados do contato ---
         perfil = self._normalizar_contato(contact_data, webhook_data)
 
+        # --- 1.1 dados_basicos (formato canônico consumido pelo Squad 2) ---
+        # Squad 2 (Analisador de Engajamento, Scorer, Classificador) le
+        # dados em INGLES a partir de perfil_squad1.dados_basicos.
+        # Este dict reexpõe os campos crus do RD Station que nao sao
+        # duplicados em _normalizar_contato (que usa nomes em PT).
+        # Em particular, last_conversion_date e created_at sao usados
+        # para calcular recencia/timing — sem isso a recencia fica 0 e
+        # o lead parece "sem interacoes recentes" mesmo tendo conversoes.
+        perfil["dados_basicos"] = {
+            "uuid": contact_data.get("uuid", ""),
+            "email": contact_data.get("email", ""),
+            "name": contact_data.get("name", ""),
+            "job_title": contact_data.get("job_title", ""),
+            "company_name": contact_data.get("company_name", "") or (webhook_data or {}).get("company", ""),
+            "personal_phone": contact_data.get("personal_phone", ""),
+            "mobile_phone": contact_data.get("mobile_phone", ""),
+            "city": contact_data.get("city", ""),
+            "state": contact_data.get("state", ""),
+            "country": contact_data.get("country", "Brasil"),
+            "linkedin": contact_data.get("linkedin", ""),
+            "website": contact_data.get("website", ""),
+            "created_at": contact_data.get("created_at", ""),
+            "last_conversion_date": contact_data.get("last_conversion_date", ""),
+            "first_conversion_date": contact_data.get("first_conversion_date", ""),
+            "tags": contact_data.get("tags", []),
+        }
+
         # --- 2. Buscar histórico de eventos ---
         eventos = await self._buscar_eventos(uuid)
         perfil["historico_conversoes"] = eventos.get("conversions", [])
@@ -387,13 +414,28 @@ Responda APENAS com JSON:
                     continue
 
         timestamps.sort()
-        primeira = timestamps[0] if timestamps else now
-        ultima = timestamps[-1] if timestamps else now
-        dias_primeira = (now - primeira).days
-        dias_ultima = (now - ultima).days
+        # IMPORTANTE: quando nao ha conversoes, dias_primeira/ultima
+        # devem ser None (e nao 0). Antes o codigo usava now como fallback,
+        # o que fazia o scoring achar que a ultima conversao foi "hoje"
+        # e dar +20 pontos de engajamento a um lead sem conversao alguma.
+        if timestamps:
+            primeira = timestamps[0]
+            ultima = timestamps[-1]
+            dias_primeira = (now - primeira).days
+            dias_ultima = (now - ultima).days
+        else:
+            primeira = None
+            ultima = None
+            dias_primeira = None
+            dias_ultima = None
+
+        # Conversoes recentes (janelas de 30 e 90 dias) — usadas pelo
+        # Scorer para medir VELOCIDADE real, diferente de total cumulativo.
+        conv_30d = sum(1 for t in timestamps if (now - t).days <= 30)
+        conv_90d = sum(1 for t in timestamps if (now - t).days <= 90)
 
         # Frequência média (conversões/mês)
-        if dias_primeira > 30 and total_conv > 1:
+        if dias_primeira is not None and dias_primeira > 30 and total_conv > 1:
             meses = max(dias_primeira / 30, 1)
             frequencia = round(total_conv / meses, 2)
         else:
@@ -404,9 +446,9 @@ Responda APENAS com JSON:
         score += min(total_conv * 10, 30)          # até 30 pts por conversões
         score += min(total_opp * 20, 20)            # até 20 pts por oportunidades
         score += min(frequencia * 10, 20)           # até 20 pts por frequência
-        if dias_ultima <= 7:
+        if dias_ultima is not None and dias_ultima <= 7:
             score += 20                              # 20 pts se ativo na última semana
-        elif dias_ultima <= 30:
+        elif dias_ultima is not None and dias_ultima <= 30:
             score += 10                              # 10 pts se ativo no último mês
         # Bonus por funil avançado
         stage = funil.get("lifecycle_stage", "").lower()
@@ -417,12 +459,14 @@ Responda APENAS com JSON:
         return {
             "total_conversoes": total_conv,
             "total_oportunidades": total_opp,
+            "conversoes_ultimos_30d": conv_30d,
+            "conversoes_ultimos_90d": conv_90d,
             "dias_desde_primeira_conversao": dias_primeira,
             "dias_desde_ultima_conversao": dias_ultima,
             "frequencia_mensal": frequencia,
             "score_engajamento": score,
-            "primeira_conversao": primeira.isoformat() if timestamps else None,
-            "ultima_conversao": ultima.isoformat() if timestamps else None,
+            "primeira_conversao": primeira.isoformat() if primeira else None,
+            "ultima_conversao": ultima.isoformat() if ultima else None,
         }
 
     def _analisar_historico_conteudos(self, conversoes: list[dict]) -> dict:
