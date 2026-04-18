@@ -183,12 +183,27 @@ class AnalisadorEngajamentoAgent:
                 metrics["created_at"] = perfil_squad1.get("dados_basicos", {}).get("created_at", "")
                 metrics["last_conversion"] = perfil_squad1.get("dados_basicos", {}).get("last_conversion_date", "")
 
-                # Interações com conteúdo
-                interacoes = perfil_squad1.get("interacoes_conteudo", {})
+                # Interações com conteúdo — totais + janelas recentes
+                interacoes = perfil_squad1.get("interacoes_conteudo", {}) or {}
                 metrics["newsletters"] = interacoes.get("newsletters", 0)
                 metrics["eventos"] = interacoes.get("eventos", 0)
                 metrics["webinars"] = interacoes.get("webinars", 0)
                 metrics["materiais"] = interacoes.get("materiais", 0)
+                metrics["formularios"] = interacoes.get("formularios", 0)
+                # Ultimos 30 dias (usados para 'atividade recente' no score)
+                metrics["eventos_30d"] = interacoes.get("eventos_30d", 0)
+                metrics["webinars_30d"] = interacoes.get("webinars_30d", 0)
+                metrics["materiais_30d"] = interacoes.get("materiais_30d", 0)
+                metrics["newsletters_30d"] = interacoes.get("newsletters_30d", 0)
+                metrics["formularios_30d"] = interacoes.get("formularios_30d", 0)
+                metrics["total_30d"] = interacoes.get("total_30d", 0)
+                # Ultimos 90 dias
+                metrics["total_90d"] = interacoes.get("total_90d", 0)
+
+                # Conversoes do coletor (ja filtradas por janela)
+                metrics["conversoes_ultimos_30d"] = metricas_s1.get("conversoes_ultimos_30d", 0)
+                metrics["conversoes_ultimos_90d"] = metricas_s1.get("conversoes_ultimos_90d", 0)
+                metrics["dias_desde_ultima_conversao"] = metricas_s1.get("dias_desde_ultima_conversao")
 
                 metrics["tem_dados"] = True
             else:
@@ -530,17 +545,77 @@ class AnalisadorEngajamentoAgent:
             depth += 15  # Múltiplas conversões
         scores["profundidade"] = min(depth, 100)
 
+        # --- Score de ATIVIDADE RECENTE (0-100) ---
+        # Mede se o lead esta ATIVO hoje (distinto de volume, que e cumulativo).
+        # Participar de eventos/webinars recentes e o sinal mais forte;
+        # downloads e formularios sao sinais medios; newsletters contam pouco.
+        # Tambem considera mensagens Hablla e conversoes gerais em 30 dias.
+        eventos_30 = (rd.get("eventos_30d", 0) or 0) + (rd.get("webinars_30d", 0) or 0)
+        materiais_30 = rd.get("materiais_30d", 0) or 0
+        newsletters_30 = rd.get("newsletters_30d", 0) or 0
+        formularios_30 = rd.get("formularios_30d", 0) or 0
+        conv_30d = rd.get("conversoes_ultimos_30d", 0) or 0
+
+        # Mensagens Hablla recentes (se disponivel)
+        msgs_30_hablla = 0
+        try:
+            from datetime import timedelta  # noqa: PLC0415
+            cutoff = now - timedelta(days=30)
+            for m in hablla.get("mensagens_recentes", []) or []:
+                dt_str = m.get("created_at") or m.get("timestamp") or ""
+                if dt_str:
+                    try:
+                        dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        if dt >= cutoff and m.get("from_lead"):
+                            msgs_30_hablla += 1
+                    except (ValueError, TypeError):
+                        pass
+        except Exception:
+            pass
+
+        atividade = 0
+        if eventos_30 >= 2:
+            atividade += 45
+        elif eventos_30 == 1:
+            atividade += 30
+        if materiais_30 >= 2:
+            atividade += 20
+        elif materiais_30 == 1:
+            atividade += 12
+        if formularios_30 >= 1:
+            atividade += min(formularios_30 * 8, 15)
+        if msgs_30_hablla >= 3:
+            atividade += 15
+        elif msgs_30_hablla >= 1:
+            atividade += 8
+        if conv_30d >= 3:
+            atividade += 10
+        elif conv_30d == 2:
+            atividade += 5
+        if newsletters_30 >= 3:
+            atividade += 3
+        scores["atividade_recente"] = min(atividade, 100)
+
         return scores
 
     def _score_total_ponderado(self, scores: dict) -> int:
-        """Calcula score total como média ponderada."""
+        """Calcula score total como média ponderada.
+
+        Pesos rebalanceados para priorizar ATIVIDADE RECENTE (interacao
+        ativa em 30 dias) como principal sinal de engajamento — e a
+        intencao do scoring comercial. Volume cumulativo e completude
+        ficam como pesos menores (um 'bom' lead inativo nao vale muito).
+        """
         pesos = {
-            "volume_interacao": 0.20,
-            "recencia": 0.25,
-            "multicanalidade": 0.10,
-            "responsividade": 0.15,
-            "completude_perfil": 0.10,
-            "profundidade": 0.20,
+            "atividade_recente": 0.30,   # interacoes em eventos/materiais/mensagens nos ultimos 30d
+            "recencia": 0.20,            # quao recente foi a ultima interacao
+            "profundidade": 0.15,        # oportunidades/deals/anotacoes
+            "volume_interacao": 0.10,    # touchpoints totais (historico)
+            "responsividade": 0.10,      # quao rapido responde no Hablla
+            "multicanalidade": 0.08,     # quantos canais usa
+            "completude_perfil": 0.07,   # quanto do perfil esta preenchido
         }
 
         total_peso = 0.0

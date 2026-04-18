@@ -221,36 +221,34 @@ class ScorerAgent:
         engajamento: dict | None,
     ) -> tuple[int, str]:
         """
-        Calcula score de timing (0-100) com base em INTERACOES RECENTES.
+        Calcula score de timing (0-100) — APENAS "e o momento certo?".
 
-        Distribuicao:
-          Sazonalidade       ....  0..25
-          Recencia absoluta  ....  0..25  (dias desde ultima conversao)
-          Interacoes ativas  ....  0..35  (eventos/webinars/materiais em 30d)
-          Velocidade no funil ...  0..15  (quantidade de conversoes em 30d)
+        Timing responde a uma pergunta simples: a janela comercial esta
+        aberta? Nao se preocupa com o QUANTO o lead interage (isso e
+        engajamento). Composicao:
 
-        Sinais valorizados: participacao em eventos/webinars (sinal forte
-        de intencao), downloads de material, multiplas conversoes recentes.
-        Newsletters antigas nao contam — o lead precisa estar ATIVO hoje.
+          Sazonalidade     ........ 0..50  (mes atual no calendario)
+          Recencia         ........ 0..50  (dias desde ultima conversao)
+
+        A quantidade/tipo de interacoes nos ultimos 30 dias entra no
+        score de ENGAJAMENTO, nao aqui.
         """
         score = 0
         partes: list[str] = []
 
-        # --- Sazonalidade (0..25) ---
+        # --- Sazonalidade (0..50) ---
         mes_atual = now.month
         if mes_atual in MESES_PICO:
-            score += 25
+            score += 50
             partes.append("mes em temporada de matricula (jan-mar/jul-ago)")
         elif mes_atual in {4, 5, 6, 9, 10}:
-            score += 12
+            score += 25
             partes.append("periodo intermediario de matricula")
         else:
-            score += 5
+            score += 10
             partes.append("fora de temporada (nov/dez)")
 
-        # --- Recencia absoluta pela ultima conversao (0..25) ---
-        # Usa dias_desde_ultima_conversao do Coletor (mais preciso que o
-        # bucket "recencia" do Analisador).
+        # --- Recencia pela ultima conversao (0..50) ---
         dias_ult = None
         if perfil_squad1:
             dias_ult = (perfil_squad1.get("metricas_engajamento", {}) or {}).get(
@@ -259,70 +257,19 @@ class ScorerAgent:
         if dias_ult is None:
             partes.append("sem historico de conversoes")
         elif dias_ult <= 7:
-            score += 25
+            score += 50
             partes.append(f"ultima conversao ha {dias_ult}d (muito recente)")
         elif dias_ult <= 14:
-            score += 18
+            score += 35
             partes.append(f"ultima conversao ha {dias_ult}d")
         elif dias_ult <= 30:
-            score += 10
+            score += 20
             partes.append(f"ultima conversao ha {dias_ult}d")
         elif dias_ult <= 60:
-            score += 4
+            score += 8
             partes.append(f"ultima conversao ha {dias_ult}d (esfriando)")
         else:
-            partes.append(f"ultima conversao ha {dias_ult}d (lead frio)")
-
-        # --- Interacoes ativas em 30 dias (0..35) ---
-        # Participacao em eventos/webinars = sinal forte de intencao.
-        # Download de material = sinal medio.
-        # Newsletter = sinal fraco (normalmente automatico).
-        interacoes = {}
-        if perfil_squad1:
-            interacoes = perfil_squad1.get("interacoes_conteudo", {}) or {}
-
-        eventos_30 = (interacoes.get("eventos_30d", 0) or 0) + (interacoes.get("webinars_30d", 0) or 0)
-        materiais_30 = interacoes.get("materiais_30d", 0) or 0
-        newsletters_30 = interacoes.get("newsletters_30d", 0) or 0
-        formularios_30 = interacoes.get("formularios_30d", 0) or 0
-
-        bonus_interacoes = 0
-        detalhes_interacoes: list[str] = []
-        if eventos_30 >= 2:
-            bonus_interacoes += 25
-            detalhes_interacoes.append(f"{eventos_30} participacoes em eventos/webinars")
-        elif eventos_30 == 1:
-            bonus_interacoes += 15
-            detalhes_interacoes.append("1 participacao em evento/webinar")
-        if materiais_30 >= 1:
-            bonus_interacoes += min(10, materiais_30 * 5)
-            detalhes_interacoes.append(f"{materiais_30} download(s) de material")
-        if formularios_30 >= 1:
-            bonus_interacoes += min(8, formularios_30 * 4)
-            detalhes_interacoes.append(f"{formularios_30} formulario(s) preenchido(s)")
-        if newsletters_30 >= 3:
-            bonus_interacoes += 3
-            detalhes_interacoes.append(f"{newsletters_30} newsletters consumidas")
-
-        bonus_interacoes = min(bonus_interacoes, 35)
-        score += bonus_interacoes
-        if detalhes_interacoes:
-            partes.append("em 30 dias: " + ", ".join(detalhes_interacoes))
-        elif dias_ult is not None and dias_ult <= 30:
-            partes.append("sem interacoes ativas (apenas registros passivos)")
-
-        # --- Velocidade no funil (0..15) ---
-        if perfil_squad1:
-            metricas = perfil_squad1.get("metricas_engajamento", {}) or {}
-            conv_30d = metricas.get("conversoes_ultimos_30d", 0) or 0
-            if conv_30d >= 4:
-                score += 15
-                partes.append(f"alta velocidade ({conv_30d} conversoes em 30d)")
-            elif conv_30d >= 2:
-                score += 10
-                partes.append(f"{conv_30d} conversoes em 30d")
-            elif conv_30d >= 1:
-                score += 5
+            partes.append(f"ultima conversao ha {dias_ult}d (fora da janela)")
 
         razao = "; ".join(partes).capitalize() + "."
         return min(score, 100), razao
@@ -338,10 +285,9 @@ class ScorerAgent:
         perfil_squad1: dict | None,
     ) -> str:
         """
-        Gera uma razao textual para o score de engajamento.
-        O score em si vem do Analisador de Engajamento (ja determinístico);
-        aqui so explicamos o que contribuiu para ele, separando
-        historico (total) de atividade recente.
+        Gera uma razao textual para o score de engajamento, destacando
+        interacoes ATIVAS (eventos, webinars, materiais, mensagens) por
+        tipo — que e o que o comercial quer ver.
         """
         if not engajamento and not perfil_squad1:
             return "Sem dados de engajamento disponiveis."
@@ -351,8 +297,10 @@ class ScorerAgent:
         sub = (engajamento or {}).get("scores", {}) or {}
         canais = (engajamento or {}).get("canais_ativos", []) or []
         hablla = (engajamento or {}).get("hablla", {}) or {}
+        interacoes = (perfil_squad1 or {}).get("interacoes_conteudo", {}) or {}
+        metricas = (perfil_squad1 or {}).get("metricas_engajamento", {}) or {}
 
-        # Visao geral pelo score
+        # Visao geral
         if score >= 70:
             partes.append("lead altamente engajado")
         elif score >= 40:
@@ -362,37 +310,50 @@ class ScorerAgent:
         else:
             partes.append("engajamento minimo")
 
-        # Multicanalidade
-        if canais:
-            partes.append(f"{len(canais)} canal(is): {', '.join(canais)}")
+        # Interacoes ATIVAS em 30 dias — o coracao do engajamento
+        eventos_30 = (interacoes.get("eventos_30d", 0) or 0) + (interacoes.get("webinars_30d", 0) or 0)
+        materiais_30 = interacoes.get("materiais_30d", 0) or 0
+        formularios_30 = interacoes.get("formularios_30d", 0) or 0
+        newsletters_30 = interacoes.get("newsletters_30d", 0) or 0
+        conv_30d = metricas.get("conversoes_ultimos_30d", 0) or 0
 
-        # Conversoes — separar TOTAL x RECENTE
-        total_conv = 0
-        conv_30d = 0
-        dias_ult = None
-        if perfil_squad1:
-            metricas = perfil_squad1.get("metricas_engajamento", {}) or {}
-            total_conv = metricas.get("total_conversoes", 0) or 0
-            conv_30d = metricas.get("conversoes_ultimos_30d", 0) or 0
-            dias_ult = metricas.get("dias_desde_ultima_conversao")
+        ativ: list[str] = []
+        if eventos_30:
+            ativ.append(f"{eventos_30} evento(s)/webinar(s)")
+        if materiais_30:
+            ativ.append(f"{materiais_30} material(is)")
+        if formularios_30:
+            ativ.append(f"{formularios_30} formulario(s)")
+        if newsletters_30 >= 3:
+            ativ.append(f"{newsletters_30} newsletters")
+        if ativ:
+            partes.append("em 30d: " + ", ".join(ativ))
+        elif conv_30d:
+            partes.append(f"{conv_30d} conversao(s) em 30d")
 
-        if conv_30d > 0:
-            partes.append(f"{conv_30d} conversao(s) em 30 dias ({total_conv} no total)")
-        elif total_conv > 0 and dias_ult is not None:
-            partes.append(f"{total_conv} conversao(s) historicas (ultima ha {dias_ult}d)")
-        elif total_conv > 0:
-            partes.append(f"{total_conv} conversao(s) no historico")
+        # Contexto historico (separado)
+        total_conv = metricas.get("total_conversoes", 0) or 0
+        dias_ult = metricas.get("dias_desde_ultima_conversao")
+        if total_conv and not ativ and not conv_30d:
+            if dias_ult is not None:
+                partes.append(f"{total_conv} conversao(s) historicas (ultima ha {dias_ult}d)")
+            else:
+                partes.append(f"{total_conv} conversao(s) no historico")
 
-        # Dados Hablla
+        # Hablla
         total_msgs = hablla.get("total_msgs_recebidas_do_lead", 0) or 0
         cards_abertos = hablla.get("cards_abertos", 0) or 0
         if total_msgs:
-            partes.append(f"{total_msgs} mensagem(ns) no Hablla")
+            partes.append(f"{total_msgs} msg(s) Hablla")
         if cards_abertos:
             partes.append(f"{cards_abertos} card(s) ativo(s)")
 
-        # Sinais de alerta so se RECENCIA baixa E nao ha atividade recente
-        if sub.get("recencia", 0) <= 15 and conv_30d == 0:
+        # Canais
+        if canais:
+            partes.append(f"canais: {', '.join(canais)}")
+
+        # Sinais de alerta
+        if sub.get("recencia", 0) <= 15 and not ativ and conv_30d == 0:
             partes.append("sem interacoes recentes")
         if sub.get("responsividade", 0) == 0 and total_msgs:
             partes.append("lead nao respondeu mensagens")
