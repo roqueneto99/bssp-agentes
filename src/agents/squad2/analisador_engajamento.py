@@ -144,6 +144,12 @@ class AnalisadorEngajamentoAgent:
         score_total = self._score_total_ponderado(scores)
         resultado["score_engajamento_total"] = score_total
 
+        # Breakdown detalhado (cada sub-dimensao com seu score, peso e razao)
+        # Fica exposto na UI para o time ver exatamente o que contribuiu.
+        resultado["engajamento_dimensoes_detalhe"] = self._detalhar_dimensoes(
+            scores, rd_metrics, hablla_metrics,
+        )
+
         # =============================================================
         # 4. SINAIS COMPORTAMENTAIS
         # =============================================================
@@ -266,16 +272,29 @@ class AnalisadorEngajamentoAgent:
         }
 
         if not self.hablla:
+            # Log explicito — importante para debug ("por que so canais=rdstation?")
+            logger.info(
+                "Hablla: client nao inicializado para %s "
+                "(HABLLA_API_TOKEN provavelmente ausente)", email,
+            )
+            metrics["motivo_vazio"] = "hablla_client_nao_inicializado"
             return metrics
 
         try:
             # 1. Buscar pessoa no Hablla
             pessoa = await self.hablla.search_person_by_email(email)
             if not pessoa:
+                logger.info("Hablla: email %s nao encontrado no workspace", email)
+                metrics["motivo_vazio"] = "email_nao_encontrado_no_hablla"
                 return metrics
 
             person_id = pessoa.get("id") or pessoa.get("_id") or ""
             if not person_id:
+                logger.warning(
+                    "Hablla: pessoa %s encontrada mas sem person_id "
+                    "(keys=%s)", email, list(pessoa.keys())[:8],
+                )
+                metrics["motivo_vazio"] = "pessoa_sem_id"
                 return metrics
 
             metrics["tem_dados"] = True
@@ -599,6 +618,138 @@ class AnalisadorEngajamentoAgent:
         scores["atividade_recente"] = min(atividade, 100)
 
         return scores
+
+    def _detalhar_dimensoes(
+        self, scores: dict, rd: dict, hablla: dict,
+    ) -> list[dict]:
+        """
+        Monta breakdown legivel de cada sub-dimensao para exibicao na UI.
+
+        Cada item: {nome, score, peso, razao}
+        """
+        pesos = {
+            "atividade_recente": 0.30,
+            "recencia": 0.20,
+            "profundidade": 0.15,
+            "volume_interacao": 0.10,
+            "responsividade": 0.10,
+            "multicanalidade": 0.08,
+            "completude_perfil": 0.07,
+        }
+
+        # Atividade recente — detalhar contadores por tipo (30d)
+        eventos_30 = (rd.get("eventos_30d", 0) or 0) + (rd.get("webinars_30d", 0) or 0)
+        materiais_30 = rd.get("materiais_30d", 0) or 0
+        newsletters_30 = rd.get("newsletters_30d", 0) or 0
+        formularios_30 = rd.get("formularios_30d", 0) or 0
+        ativ_parts: list[str] = []
+        if eventos_30: ativ_parts.append(f"{eventos_30} evento(s)/webinar(s)")
+        if materiais_30: ativ_parts.append(f"{materiais_30} material(is)")
+        if formularios_30: ativ_parts.append(f"{formularios_30} formulario(s)")
+        if newsletters_30 >= 3: ativ_parts.append(f"{newsletters_30} newsletters")
+        if not ativ_parts:
+            ativ_parts.append("sem interacoes ativas em 30 dias")
+        razao_atividade = ", ".join(ativ_parts)
+
+        # Recencia — textualizar
+        last_conv = rd.get("last_conversion", "")
+        if last_conv:
+            try:
+                dt = datetime.fromisoformat(last_conv.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                days = (datetime.now(timezone.utc) - dt).days
+                razao_recencia = f"ultima conversao ha {days}d (em {dt.date().isoformat()})"
+            except (ValueError, AttributeError):
+                razao_recencia = "data de ultima conversao invalida"
+        else:
+            razao_recencia = "sem data de ultima conversao registrada"
+
+        # Profundidade
+        oport = rd.get("total_oportunidades", 0) or 0
+        cards_ab = hablla.get("cards_abertos", 0) or 0
+        anot = hablla.get("total_anotacoes", 0) or 0
+        conv_tot = rd.get("total_conversoes", 0) or 0
+        prof_parts: list[str] = []
+        if oport > 0: prof_parts.append(f"{oport} oportunidade(s) no RD")
+        if cards_ab > 0: prof_parts.append(f"{cards_ab} card(s) ativo(s) no Hablla")
+        if anot > 0: prof_parts.append(f"{anot} anotacao(oes) da equipe")
+        if conv_tot >= 3: prof_parts.append(f"{conv_tot} conversoes totais")
+        if not prof_parts:
+            prof_parts.append("sem marcos de aprofundamento")
+        razao_prof = "; ".join(prof_parts)
+
+        # Volume
+        conversas = hablla.get("total_conversas", 0) or 0
+        msgs = hablla.get("total_msgs_recebidas_do_lead", 0) or 0
+        cards = hablla.get("total_cards", 0) or 0
+        touchpoints = conv_tot + conversas + msgs + cards + anot
+        razao_volume = (
+            f"{touchpoints} touchpoint(s) cumulativos "
+            f"(RD conv={conv_tot}, Hablla conversas={conversas}, "
+            f"msgs={msgs}, cards={cards}, anotacoes={anot})"
+        )
+
+        # Responsividade
+        tempo_resp = hablla.get("tempo_resposta_medio_s")
+        motivo_hablla_vazio = hablla.get("motivo_vazio", "")
+        if tempo_resp is not None and msgs > 0:
+            if tempo_resp < 60: t = "< 1 min"
+            elif tempo_resp < 300: t = "< 5 min"
+            elif tempo_resp < 900: t = "< 15 min"
+            elif tempo_resp < 3600: t = "< 1h"
+            elif tempo_resp < 86400: t = "< 24h"
+            else: t = "> 24h"
+            razao_resp = f"tempo medio de resposta no Hablla: {t} ({int(tempo_resp)}s)"
+        elif msgs > 0:
+            razao_resp = f"lead respondeu {msgs} msg(s), mas sem tempo calculado"
+        elif motivo_hablla_vazio == "hablla_client_nao_inicializado":
+            razao_resp = "Hablla nao integrado (token ausente) — sem dados de resposta"
+        elif motivo_hablla_vazio == "email_nao_encontrado_no_hablla":
+            razao_resp = "lead nao encontrado no Hablla — sem dados de resposta"
+        else:
+            razao_resp = "sem dados de resposta (sem mensagens Hablla)"
+
+        # Multicanalidade
+        canais_hablla = hablla.get("canais_com_interacao", []) or []
+        canais_list = list(canais_hablla)
+        if rd.get("tem_dados"):
+            canais_list = ["rdstation"] + canais_list
+        razao_multi = (
+            f"{len(canais_list)} canal(is): {', '.join(canais_list)}"
+            if canais_list else "nenhum canal ativo"
+        )
+
+        # Completude
+        compl = rd.get("completude_perfil", 0) or 0
+        if isinstance(compl, float) and compl <= 1:
+            compl_pct = int(compl * 100)
+        else:
+            compl_pct = int(compl)
+        razao_compl = f"{compl_pct}% do perfil preenchido"
+
+        labels = {
+            "atividade_recente": ("Atividade recente", razao_atividade),
+            "recencia": ("Recencia", razao_recencia),
+            "profundidade": ("Profundidade", razao_prof),
+            "volume_interacao": ("Volume (historico)", razao_volume),
+            "responsividade": ("Responsividade", razao_resp),
+            "multicanalidade": ("Multicanalidade", razao_multi),
+            "completude_perfil": ("Completude do perfil", razao_compl),
+        }
+
+        detalhe = []
+        for dim, peso in pesos.items():
+            nome, razao = labels[dim]
+            detalhe.append({
+                "dim": dim,
+                "nome": nome,
+                "score": scores.get(dim, 0),
+                "peso": peso,
+                "contribuicao": round(scores.get(dim, 0) * peso, 1),
+                "razao": razao,
+            })
+        return detalhe
 
     def _score_total_ponderado(self, scores: dict) -> int:
         """Calcula score total como média ponderada.

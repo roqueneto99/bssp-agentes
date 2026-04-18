@@ -195,8 +195,10 @@ class ScorerAgent:
         # SCORE 1: ENGAGEMENT (determinístico — vem do Analisador)
         # =============================================================
         engagement_score = 0
+        engagement_detalhe: list[dict] = []
         if engajamento:
             engagement_score = engajamento.get("score_engajamento_total", 0)
+            engagement_detalhe = engajamento.get("engajamento_dimensoes_detalhe", []) or []
         elif perfil_squad1:
             # Fallback: usar score do Squad 1
             metricas = perfil_squad1.get("metricas_engajamento", {})
@@ -256,7 +258,16 @@ class ScorerAgent:
             "dimensoes": {
                 "fit": {"score": fit_score, "peso": pesos["fit"], "razao": fit_razao},
                 "interest": {"score": interest_score, "peso": pesos["interest"], "razao": interest_razao},
-                "engagement": {"score": engagement_score, "peso": pesos["engagement"], "razao": engagement_razao},
+                "engagement": {
+                    "score": engagement_score,
+                    "peso": pesos["engagement"],
+                    "razao": engagement_razao,
+                    # Breakdown detalhado das 7 sub-dimensoes do engajamento
+                    # (atividade_recente, recencia, profundidade, volume,
+                    # responsividade, multicanalidade, completude). A UI
+                    # pode expandir e mostrar cada uma com seu score/peso.
+                    "sub_dimensoes": engagement_detalhe,
+                },
                 "timing": {"score": timing_score, "peso": pesos["timing"], "razao": timing_razao},
             },
             "resumo": resumo_llm,

@@ -750,6 +750,117 @@ async def preload_cache(seg_id: int):
     return {"status": "started"}
 
 
+@app.get("/api/hablla/diagnose/{email}")
+async def diagnose_hablla(email: str):
+    """
+    Diagnostico do Hablla para um lead especifico.
+
+    Retorna:
+      - Se o HabllaClient esta inicializado
+      - Se a pessoa foi encontrada (por email)
+      - Quantos services/cards/anotacoes/mensagens tem
+      - Canais em que interagiu
+      - Resumo do que o Analisador de Engajamento ve
+
+    Util para responder "por que canais=apenas rdstation?".
+    """
+    import os as _os  # para nao ofuscar o 'os' global
+    result: dict = {
+        "email": email,
+        "hablla_token_configurado": bool(_os.getenv("HABLLA_API_TOKEN", "")),
+        "hablla_workspace_id": _os.getenv("HABLLA_WORKSPACE_ID", "") or None,
+        "client_inicializado": hablla is not None,
+    }
+    if hablla is None:
+        result["motivo"] = (
+            "HabllaClient = None no startup. Cheque HABLLA_API_TOKEN "
+            "nas variaveis de ambiente do Railway."
+        )
+        return result
+
+    # 1. Tentar achar a pessoa
+    try:
+        pessoa = await hablla.search_person_by_email(email)
+    except Exception as e:  # noqa: BLE001
+        result["erro_busca"] = str(e)
+        return result
+
+    if not pessoa:
+        result["encontrado"] = False
+        result["motivo"] = (
+            "Email nao encontrado no Hablla (endpoint /v2/persons com "
+            "search=email nao retornou match). O contato pode existir "
+            "com outro email principal ou nao estar no workspace."
+        )
+        return result
+
+    person_id = pessoa.get("id") or pessoa.get("_id") or ""
+    result["encontrado"] = True
+    result["person_id"] = person_id
+    result["nome_hablla"] = pessoa.get("name", "")
+    result["customer_status"] = pessoa.get("customer_status", "")
+    result["emails_cadastrados"] = [
+        e.get("email") if isinstance(e, dict) else e
+        for e in (pessoa.get("emails") or [])
+    ]
+    result["phones_cadastrados"] = [
+        p.get("phone") if isinstance(p, dict) else p
+        for p in (pessoa.get("phones") or [])
+    ]
+    tags = pessoa.get("tags", []) or []
+    result["tags_hablla"] = [
+        t.get("name") if isinstance(t, dict) else str(t) for t in tags
+    ]
+
+    # 2. Services (atendimentos = conversas multicanal)
+    try:
+        svcs = await hablla.list_services(person_id=person_id, limit=50)
+        lista = svcs.get("results", []) or []
+        result["services_total"] = svcs.get("totalItems", len(lista))
+        canais = sorted({(s.get("type") or "").lower() for s in lista if s.get("type")})
+        result["canais_com_interacao"] = canais
+        if lista:
+            ultimo = max(lista, key=lambda s: s.get("updated_at") or s.get("created_at") or "")
+            result["ultima_conversa"] = {
+                "canal": ultimo.get("type"),
+                "status": ultimo.get("status"),
+                "data": ultimo.get("updated_at") or ultimo.get("created_at"),
+            }
+    except Exception as e:  # noqa: BLE001
+        result["erro_services"] = str(e)
+
+    # 3. Cards (deals no pipeline Hablla)
+    try:
+        cards = await hablla.list_cards(person_id=person_id, limit=50)
+        lc = cards.get("results", []) or []
+        result["cards_total"] = cards.get("totalItems", len(lc))
+        result["cards_abertos"] = sum(1 for c in lc if (c.get("status") or "").lower() == "open")
+    except Exception as e:  # noqa: BLE001
+        result["erro_cards"] = str(e)
+
+    # 4. Anotacoes
+    try:
+        anot = await hablla.list_annotations(person_id=person_id, limit=50)
+        la = anot.get("results", []) or []
+        result["anotacoes_total"] = anot.get("totalItems", len(la))
+        result["ultimas_anotacoes"] = [
+            {"autor": a.get("user_name") or a.get("author") or "?",
+             "texto": (a.get("content") or a.get("message") or "")[:120]}
+            for a in la[:3]
+        ]
+    except Exception as e:  # noqa: BLE001
+        result["erro_anotacoes"] = str(e)
+
+    # 5. Tags
+    try:
+        tags_list = await hablla.list_tags()
+        result["tags_total_workspace"] = len(tags_list or [])
+    except Exception as e:  # noqa: BLE001
+        result["erro_tags"] = str(e)
+
+    return result
+
+
 @app.get("/api/cache/status")
 async def cache_status():
     """Retorna status de todos os caches ativos."""

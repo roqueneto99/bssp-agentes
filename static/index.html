@@ -908,6 +908,32 @@ td .conv-date{font-size:11px;color:#64748b;margin-top:2px}
               html += '<div style="width:'+ds+'%;height:100%;background:'+barColor+';border-radius:4px;transition:width .5s"></div>';
               html += '</div>';
               if (dv.razao) html += '<div style="font-size:11px;color:#64748b;margin-top:2px">' + dv.razao + '</div>';
+
+              // Breakdown detalhado do Engajamento (7 sub-dimensoes)
+              var subs = dv.sub_dimensoes || [];
+              if (dk === "engagement" && subs.length) {
+                var detailsId = "engDetail-" + email.replace(/[^a-z0-9]/gi,"");
+                html += '<details style="margin-top:6px;margin-bottom:4px;padding:6px 10px;background:#0f172a;border-radius:6px;border-left:2px solid #334155" id="' + detailsId + '">';
+                html += '<summary style="font-size:11px;color:#94a3b8;cursor:pointer;user-select:none">Ver detalhamento do engajamento (7 sub-dimens\u00f5es)</summary>';
+                html += '<div style="margin-top:8px">';
+                for (var si = 0; si < subs.length; si++) {
+                  var s = subs[si];
+                  var ss = s.score || 0;
+                  var sBarColor = ss>=70?"#22c55e":ss>=40?"#f59e0b":ss>0?"#ef4444":"#475569";
+                  html += '<div style="margin-bottom:8px;padding-bottom:6px;border-bottom:1px dashed #1e293b">';
+                  html += '<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:2px">';
+                  html += '<span style="color:#cbd5e1">' + s.nome + ' <span style="color:#475569">(peso ' + Math.round((s.peso||0)*100) + '%)</span></span>';
+                  html += '<span style="color:'+sBarColor+';font-weight:600">' + ss + ' <span style="color:#475569;font-weight:400">&middot; contr. ' + (s.contribuicao||0) + '</span></span>';
+                  html += '</div>';
+                  html += '<div style="background:#1e293b;border-radius:3px;height:4px;overflow:hidden;margin-bottom:3px">';
+                  html += '<div style="width:'+ss+'%;height:100%;background:'+sBarColor+'"></div>';
+                  html += '</div>';
+                  if (s.razao) html += '<div style="font-size:10px;color:#64748b;line-height:1.4">' + s.razao + '</div>';
+                  html += '</div>';
+                }
+                html += '</div></details>';
+              }
+
               html += '</div>';
             }
             html += '</div>';
