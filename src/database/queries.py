@@ -39,9 +39,15 @@ async def list_leads(
     classificacao: str = "",
     order_by: str = "last_conversion_date",
     order_dir: str = "desc",
+    email_filter: Optional[list[str]] = None,
 ) -> dict:
     """
     Lista leads com paginação, filtros e busca.
+
+    Args:
+        email_filter: se fornecido, restringe a consulta apenas aos
+            emails listados (usado para filtrar por segmentacao — os
+            emails vem do cache da API do RD Station).
 
     Retorna formato compatível com o frontend existente.
     """
@@ -52,6 +58,23 @@ async def list_leads(
 
         # Filtros
         conditions = []
+
+        if email_filter is not None:
+            # Normaliza emails do filtro para lowercase (coluna esta em lower)
+            emails_norm = [e.lower().strip() for e in email_filter if e]
+            if not emails_norm:
+                # Segmentacao vazia — devolver zero resultados sem consultar
+                return {
+                    "contacts": [],
+                    "page": page,
+                    "page_size": page_size,
+                    "received": 0,
+                    "total": 0,
+                    "has_next": False,
+                    "has_prev": page > 1,
+                    "mode": "database",
+                }
+            conditions.append(Lead.email.in_(emails_norm))
 
         if search:
             search_like = f"%{search.lower()}%"

@@ -64,6 +64,25 @@ _seg_cache: dict[str, dict] = {}
 _cache_building: dict[str, bool] = {}  # flag para evitar builds simultâneos
 CACHE_TTL = 600  # 10 minutos
 
+# Cache da LISTA de segmentacoes (nome+id). Usado tanto por /api/segmentacoes
+# quanto pelo /api/leads (para resolver o nome quando filtra por seg_id).
+_segs_list_cache: dict = {"data": None, "ts": 0.0}
+_SEGS_LIST_TTL = 600  # 10 minutos
+
+
+async def _get_segs_list(force: bool = False) -> list[dict]:
+    """Retorna a lista de segmentacoes, cacheada em memoria."""
+    now = time.time()
+    cached = _segs_list_cache.get("data")
+    if cached is not None and not force and (now - _segs_list_cache.get("ts", 0)) < _SEGS_LIST_TTL:
+        return cached
+    if rdstation is None:
+        return []
+    segs = await rdstation.list_segmentations()
+    _segs_list_cache["data"] = segs or []
+    _segs_list_cache["ts"] = now
+    return _segs_list_cache["data"]
+
 
 async def _provisionar_custom_fields(rd: RDStationClient) -> None:
     """Cria custom fields necessários para o Squad 2 (ignora se já existem)."""
@@ -191,7 +210,7 @@ async def shutdown():
 @app.get("/api/segmentacoes")
 async def listar_segmentacoes():
     try:
-        segs = await rdstation.list_segmentations()
+        segs = await _get_segs_list()
         return [{"id": s.get("id"), "name": s.get("name"),
                  "standard": s.get("standard", False)} for s in segs]
     except Exception as e:
@@ -431,6 +450,47 @@ async def listar_leads(
             "PostgreSQL indisponivel. Verifique DATABASE_URL e reinicie o servico."
         )
 
+    # --- Resolucao de segmentacao ---
+    # No modo database o Postgres nao armazena a relacao
+    # contato<->segmentacao; por isso, quando o usuario seleciona uma
+    # segmentacao especifica, precisamos buscar a lista de emails dela
+    # via API do RD Station (com cache) e filtrar a query SQL.
+    # segmentation_id=0 significa "sem filtro" (toda a base).
+    email_filter = None
+    seg_name = None
+    if segmentation_id and segmentation_id > 0:
+        if rdstation is None:
+            raise HTTPException(
+                503,
+                "Filtro por segmentacao requer credenciais do RD Station. "
+                "Configure RDSTATION_CLIENT_ID/SECRET ou selecione "
+                "\"Todos os contatos da base de Leads\"."
+            )
+        try:
+            # Resolver nome da segmentacao (best-effort, usa cache local)
+            try:
+                for s in await _get_segs_list():
+                    if s.get("id") == segmentation_id:
+                        seg_name = s.get("name")
+                        break
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Nao foi possivel resolver nome da seg %d: %s", segmentation_id, e)
+
+            contacts_seg = await _build_seg_cache(segmentation_id)
+            email_filter = [c.get("email") for c in contacts_seg if c.get("email")]
+            logger.info(
+                "Filtro por segmentacao %d (%s): %d emails",
+                segmentation_id, seg_name or "?", len(email_filter),
+            )
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.error("Falha ao buscar contatos da seg %d: %s", segmentation_id, e)
+            raise HTTPException(
+                502,
+                "Nao foi possivel buscar a segmentacao no RD Station: %s" % e,
+            )
+
     try:
         from src.database.queries import list_leads as db_list_leads
         # Mapear date_field do frontend para coluna do banco
@@ -444,6 +504,7 @@ async def listar_leads(
             date_field=db_date_field,
             temperatura=temperatura,
             classificacao=classificacao,
+            email_filter=email_filter,
         )
         # Enriquecer com status de running
         for c in result["contacts"]:
@@ -455,7 +516,12 @@ async def listar_leads(
                     if ex.get("email") == em:
                         c["_last_exec"] = ex
                         break
+        # Exibe nome da segmentacao na UI (campo que o frontend ja consome)
+        if seg_name:
+            result["segmentation_name"] = seg_name
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Erro ao consultar PostgreSQL: %s", e)
         raise HTTPException(503, "Erro ao consultar banco: %s" % e)

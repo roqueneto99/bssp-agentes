@@ -148,11 +148,12 @@ class ScorerAgent:
             # Fallback: usar score do Squad 1
             metricas = perfil_squad1.get("metricas_engajamento", {})
             engagement_score = metricas.get("score_engajamento", 0)
+        engagement_razao = self._explicar_engagement(engagement_score, engajamento, perfil_squad1)
 
         # =============================================================
         # SCORE 2: TIMING (determinístico)
         # =============================================================
-        timing_score = self._calcular_timing(now, perfil_squad1, engajamento)
+        timing_score, timing_razao = self._calcular_timing(now, perfil_squad1, engajamento)
 
         # =============================================================
         # SCORE 3 & 4: FIT + INTEREST (via LLM)
@@ -202,8 +203,8 @@ class ScorerAgent:
             "dimensoes": {
                 "fit": {"score": fit_score, "peso": pesos["fit"], "razao": fit_razao},
                 "interest": {"score": interest_score, "peso": pesos["interest"], "razao": interest_razao},
-                "engagement": {"score": engagement_score, "peso": pesos["engagement"]},
-                "timing": {"score": timing_score, "peso": pesos["timing"]},
+                "engagement": {"score": engagement_score, "peso": pesos["engagement"], "razao": engagement_razao},
+                "timing": {"score": timing_score, "peso": pesos["timing"], "razao": timing_razao},
             },
             "resumo": resumo_llm,
             "sinais_engajamento": (engajamento or {}).get("sinais_comportamentais", []),
@@ -218,9 +219,10 @@ class ScorerAgent:
         now: datetime,
         perfil_squad1: dict | None,
         engajamento: dict | None,
-    ) -> int:
+    ) -> tuple[int, str]:
         """
-        Calcula score de timing (0-100).
+        Calcula score de timing (0-100) e devolve tambem uma razao
+        textual explicando a composicao.
 
         Fatores:
         - Proximidade de início de turmas (picos jan-mar, jul-ago)
@@ -228,38 +230,116 @@ class ScorerAgent:
         - Recência da última interação
         """
         score = 0
+        partes: list[str] = []
 
         # Sazonalidade: meses de pico de matrícula
         mes_atual = now.month
         if mes_atual in MESES_PICO:
-            score += 40  # Temporada de matrícula
+            score += 40
+            partes.append("mes em temporada de matricula (jan-mar/jul-ago)")
         elif mes_atual in {4, 5, 6, 9, 10}:
-            score += 20  # Período intermediário
+            score += 20
+            partes.append("periodo intermediario de matricula")
         else:
-            score += 10  # Período fora de temporada (nov, dez)
+            score += 10
+            partes.append("fora de temporada (nov/dez)")
 
         # Recência da última interação
         recencia = 0
         if engajamento:
             recencia = engajamento.get("scores", {}).get("recencia", 0)
         if recencia >= 80:
-            score += 35  # Interação muito recente
+            score += 35
+            partes.append("interacao muito recente")
         elif recencia >= 50:
             score += 20
+            partes.append("interacao recente")
         elif recencia >= 20:
             score += 10
+            partes.append("ultima interacao com algum atraso")
+        else:
+            partes.append("sem interacoes recentes")
 
         # Velocidade de progressão (múltiplas conversões recentes)
+        total_conv = 0
         if perfil_squad1:
             total_conv = perfil_squad1.get("metricas_engajamento", {}).get("total_conversoes", 0)
             if total_conv >= 5:
-                score += 25  # Muitas conversões = alta urgência
+                score += 25
+                partes.append(f"alta velocidade no funil ({total_conv} conversoes)")
             elif total_conv >= 3:
                 score += 15
+                partes.append(f"{total_conv} conversoes (velocidade moderada)")
             elif total_conv >= 1:
                 score += 5
+                partes.append(f"{total_conv} conversao(s) registradas")
+            else:
+                partes.append("sem conversoes registradas")
 
-        return min(score, 100)
+        razao = "; ".join(partes).capitalize() + "."
+        return min(score, 100), razao
+
+    # ------------------------------------------------------------------
+    # Engagement razao (explicacao para a dimensao deterministica)
+    # ------------------------------------------------------------------
+
+    def _explicar_engagement(
+        self,
+        score: int,
+        engajamento: dict | None,
+        perfil_squad1: dict | None,
+    ) -> str:
+        """
+        Gera uma razao textual para o score de engajamento.
+        O score em si vem do Analisador de Engajamento (ja determinístico);
+        aqui so explicamos o que contribuiu para ele.
+        """
+        if not engajamento and not perfil_squad1:
+            return "Sem dados de engajamento disponiveis."
+
+        partes: list[str] = []
+
+        sub = (engajamento or {}).get("scores", {}) or {}
+        canais = (engajamento or {}).get("canais_ativos", []) or []
+        rd = (engajamento or {}).get("rd", {}) or {}
+        hablla = (engajamento or {}).get("hablla", {}) or {}
+
+        # Visao geral pelo score
+        if score >= 70:
+            partes.append("lead altamente engajado")
+        elif score >= 40:
+            partes.append("engajamento moderado")
+        elif score >= 20:
+            partes.append("engajamento baixo")
+        else:
+            partes.append("engajamento minimo")
+
+        # Volume e multicanalidade
+        if canais:
+            partes.append(f"{len(canais)} canal(is): {', '.join(canais)}")
+
+        # Conversoes / interacoes RD
+        total_conv = 0
+        if perfil_squad1:
+            total_conv = perfil_squad1.get("metricas_engajamento", {}).get("total_conversoes", 0) or 0
+        if total_conv:
+            partes.append(f"{total_conv} conversao(s) no RD Station")
+
+        # Dados Hablla
+        total_msgs = hablla.get("total_msgs_recebidas_do_lead", 0) or 0
+        cards_abertos = hablla.get("cards_abertos", 0) or 0
+        if total_msgs:
+            partes.append(f"{total_msgs} mensagem(ns) no Hablla")
+        if cards_abertos:
+            partes.append(f"{cards_abertos} card(s) ativo(s)")
+
+        # Sinais de alerta
+        if sub.get("recencia", 0) <= 15:
+            partes.append("sem interacoes nas ultimas semanas")
+        if sub.get("responsividade", 0) == 0 and total_msgs:
+            partes.append("lead nao respondeu mensagens")
+
+        return "; ".join(partes).capitalize() + "."
 
     # ------------------------------------------------------------------
     # Inferência via LLM (Fit + Interest)
@@ -369,7 +449,10 @@ RESPONDA APENAS COM JSON VÁLIDO, sem markdown."""
             result = await self.llm.complete_json(
                 messages=[LLMMessage(role="user", content=contexto)],
                 system=system_prompt,
-                temperature=0.2,
+                # temperature=0: maxima reprodutibilidade. Valores > 0
+                # introduzem variancia entre execucoes e fazem o mesmo
+                # lead oscilar de classificacao (SAL<->MQL<->SQL).
+                temperature=0.0,
             )
             # Validar e limitar scores
             result["fit_score"] = max(0, min(100, int(result.get("fit_score", 30))))

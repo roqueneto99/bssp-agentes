@@ -169,9 +169,12 @@ class ClassificadorRotaAgent:
         # Gerar ações recomendadas
         acoes = self._gerar_acoes(rota, scoring, perfil_squad1)
 
-        # Gerar briefing (para SQL handoff)
+        # Gerar briefing — obrigatoriamente para SQL (handoff) e tambem
+        # para MQL ou qualquer score >= 50 (a pedido do comercial, para
+        # ter contexto rico quando o lead esta 'morno-quente' e pode
+        # ser abordado sob demanda).
         briefing = None
-        if rota == "sql_handoff":
+        if rota == "sql_handoff" or score_total >= 50:
             briefing = self._gerar_briefing(email, scoring, perfil_squad1)
 
         resultado = {
