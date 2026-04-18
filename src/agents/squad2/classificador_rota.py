@@ -57,6 +57,8 @@ ROTA_MAP = {
     "MQL": "mql_nurture",
     "SAL": "sal_nurture",
     "COLD": "cold_recycle",
+    # Cliente ja matriculado — nao entra em fluxo de vendas novo
+    "CLIENTE": "cliente_existente",
 }
 
 # Tags a aplicar no RD Station por rota
@@ -66,6 +68,10 @@ TAGS_ROTA = {
     "sal_nurture": ["squad2-scored", "sal-acompanhamento"],
     "cold_recycle": ["squad2-scored", "cold-reciclagem"],
     "blocked": ["squad2-scored", "lgpd-bloqueado"],
+    # Rota "cliente_existente": marca explicitamente para que o consultor
+    # comercial NAO veja este contato como lead novo. Fluxo de upsell/
+    # retencao e tratado por outro squad no futuro.
+    "cliente_existente": ["squad2-scored", "cliente-existente", "nao-abordar-como-lead"],
 }
 
 
@@ -163,7 +169,10 @@ class ClassificadorRotaAgent:
             rota = ROTA_MAP.get(classificacao, "cold_recycle")
             motivo = scoring.get("resumo", "")
 
-        score_total = (scoring or {}).get("score_total", 0)
+        # Para cliente existente o Scorer devolve score_total=None;
+        # normalizar para 0 em persistencia/log, preservando o "nao
+        # pontuou" como classificacao="CLIENTE".
+        score_total = (scoring or {}).get("score_total") or 0
         classificacao = (scoring or {}).get("classificacao", "COLD")
 
         # Gerar ações recomendadas
@@ -173,8 +182,11 @@ class ClassificadorRotaAgent:
         # para MQL ou qualquer score >= 50 (a pedido do comercial, para
         # ter contexto rico quando o lead esta 'morno-quente' e pode
         # ser abordado sob demanda).
+        # NUNCA gerar briefing para cliente existente — nao abordar.
         briefing = None
-        if rota == "sql_handoff" or score_total >= 50:
+        if rota != "cliente_existente" and (
+            rota == "sql_handoff" or (score_total or 0) >= 50
+        ):
             briefing = self._gerar_briefing(email, scoring, perfil_squad1)
 
         resultado = {
@@ -282,6 +294,18 @@ class ClassificadorRotaAgent:
                 "acao": "nenhuma_comunicacao",
                 "prioridade": "critica",
                 "descricao": "NÃO enviar comunicação — consentimento LGPD revogado",
+            })
+
+        elif rota == "cliente_existente":
+            acoes.append({
+                "acao": "nao_abordar_como_lead",
+                "prioridade": "alta",
+                "descricao": "Contato ja e aluno/cliente da BSSP — nao enviar como lead novo ao consultor comercial",
+            })
+            acoes.append({
+                "acao": "encaminhar_retencao_ou_upsell",
+                "prioridade": "media",
+                "descricao": "Avaliar fluxo de retencao/upsell (fora do escopo da Fase 1)",
             })
 
         return acoes

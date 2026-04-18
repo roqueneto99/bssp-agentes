@@ -62,6 +62,31 @@ CLASSIFICACAO = [
     (0, "COLD"),   # Lead frio
 ]
 
+# Valores de lifecycle_stage que significam "já é aluno/cliente da BSSP".
+# Em portugues no RD Station, o valor padrao e "Cliente". Cobrimos tambem
+# variantes em ingles.
+LIFECYCLE_CLIENTE = {"cliente", "customer", "client"}
+
+
+def _is_existing_customer(perfil_squad1: dict | None) -> tuple[bool, str]:
+    """
+    Detecta se o lead ja e aluno/cliente da BSSP.
+
+    Retorna (flag, origem) onde origem e uma string curta usada em logs
+    e na razao para explicar como a detecao foi feita.
+    Fonte unica: lifecycle_stage do RD Station.
+    """
+    if not perfil_squad1:
+        return False, ""
+    stage = (
+        (perfil_squad1.get("dados_basicos", {}) or {}).get("lifecycle_stage")
+        or (perfil_squad1.get("funil", {}) or {}).get("lifecycle_stage")
+        or ""
+    )
+    if str(stage).strip().lower() in LIFECYCLE_CLIENTE:
+        return True, f"lifecycle_stage={stage}"
+    return False, ""
+
 
 class ScorerAgent:
     """
@@ -137,6 +162,34 @@ class ScorerAgent:
         """Calcula os 4 scores dimensionais e a classificação final."""
 
         now = datetime.now(timezone.utc)
+
+        # =============================================================
+        # CURTO-CIRCUITO: lead ja e aluno/cliente da BSSP
+        # =============================================================
+        # Se o lifecycle_stage do RD Station indica que este contato ja
+        # matriculou (Cliente), NAO roda scoring de lead. Motivo: um
+        # aluno atual nao deve ser abordado como lead novo pelo consultor
+        # comercial — o fluxo correto seria retencao/upsell, que esta
+        # fora do escopo da Fase 1.
+        eh_cliente, fonte = _is_existing_customer(perfil_squad1)
+        if eh_cliente:
+            logger.info("Scorer: %s ja e cliente (%s) — pulando scoring", email, fonte)
+            return {
+                "email": email,
+                "timestamp": now.isoformat(),
+                "score_total": None,  # sem pontuacao — nao e lead
+                "classificacao": "CLIENTE",
+                "is_existing_customer": True,
+                "cliente_fonte": fonte,
+                "dimensoes": {},
+                "resumo": (
+                    "Contato ja e aluno/cliente ativo da BSSP "
+                    f"({fonte}). Nao deve ser tratado como lead novo — "
+                    "encaminhar para fluxo de retencao/upsell (fora do "
+                    "escopo da Fase 1)."
+                ),
+                "sinais_engajamento": (engajamento or {}).get("sinais_comportamentais", []),
+            }
 
         # =============================================================
         # SCORE 1: ENGAGEMENT (determinístico — vem do Analisador)

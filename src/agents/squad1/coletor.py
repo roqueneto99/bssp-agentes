@@ -201,6 +201,11 @@ Responda APENAS com JSON:
                 logger.warning("Falha ao buscar funil de %s: %s", email, e)
                 funil = {}
         perfil["funil"] = self._normalizar_funil(funil)
+        # Expor lifecycle_stage tambem em dados_basicos (campo de contato),
+        # para o Scorer poder detectar cliente/aluno sem precisar navegar
+        # ate perfil.funil.lifecycle_stage.
+        perfil["dados_basicos"]["lifecycle_stage"] = perfil["funil"].get("lifecycle_stage", "")
+        perfil["dados_basicos"]["opportunity"] = perfil["funil"].get("opportunity", False)
 
         # --- 4. Identificar fonte de origem ---
         fonte = self._identificar_fonte(

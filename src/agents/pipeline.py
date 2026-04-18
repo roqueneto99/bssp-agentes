@@ -123,6 +123,10 @@ class AgentPipeline:
             if r.agent_name == "squad1_coletor" and r.success:
                 perfil_para_squad2["dados_basicos"] = r.data.get("dados_basicos", {})
                 perfil_para_squad2["interacoes_conteudo"] = r.data.get("interacoes_conteudo", {})
+                # funil carrega lifecycle_stage (Lead / Lead Qualificado /
+                # Cliente) — usado pelo Scorer para detectar aluno existente
+                # e curto-circuitar o scoring.
+                perfil_para_squad2["funil"] = r.data.get("funil", {})
             if r.agent_name == "squad1_enriquecedor" and r.success:
                 perfil_para_squad2["analysis"] = r.data.get("analysis", {})
 
