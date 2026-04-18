@@ -221,70 +221,108 @@ class ScorerAgent:
         engajamento: dict | None,
     ) -> tuple[int, str]:
         """
-        Calcula score de timing (0-100) e devolve tambem uma razao
-        textual explicando a composicao.
+        Calcula score de timing (0-100) com base em INTERACOES RECENTES.
 
-        Fatores:
-        - Proximidade de início de turmas (picos jan-mar, jul-ago)
-        - Velocidade de progressão (conversões recentes = urgência)
-        - Recência da última interação
+        Distribuicao:
+          Sazonalidade       ....  0..25
+          Recencia absoluta  ....  0..25  (dias desde ultima conversao)
+          Interacoes ativas  ....  0..35  (eventos/webinars/materiais em 30d)
+          Velocidade no funil ...  0..15  (quantidade de conversoes em 30d)
+
+        Sinais valorizados: participacao em eventos/webinars (sinal forte
+        de intencao), downloads de material, multiplas conversoes recentes.
+        Newsletters antigas nao contam — o lead precisa estar ATIVO hoje.
         """
         score = 0
         partes: list[str] = []
 
-        # Sazonalidade: meses de pico de matrícula
+        # --- Sazonalidade (0..25) ---
         mes_atual = now.month
         if mes_atual in MESES_PICO:
-            score += 40
+            score += 25
             partes.append("mes em temporada de matricula (jan-mar/jul-ago)")
         elif mes_atual in {4, 5, 6, 9, 10}:
-            score += 20
+            score += 12
             partes.append("periodo intermediario de matricula")
         else:
-            score += 10
+            score += 5
             partes.append("fora de temporada (nov/dez)")
 
-        # Recência da última interação
-        recencia = 0
-        if engajamento:
-            recencia = engajamento.get("scores", {}).get("recencia", 0)
-        if recencia >= 80:
-            score += 35
-            partes.append("interacao muito recente")
-        elif recencia >= 50:
-            score += 20
-            partes.append("interacao recente")
-        elif recencia >= 20:
+        # --- Recencia absoluta pela ultima conversao (0..25) ---
+        # Usa dias_desde_ultima_conversao do Coletor (mais preciso que o
+        # bucket "recencia" do Analisador).
+        dias_ult = None
+        if perfil_squad1:
+            dias_ult = (perfil_squad1.get("metricas_engajamento", {}) or {}).get(
+                "dias_desde_ultima_conversao"
+            )
+        if dias_ult is None:
+            partes.append("sem historico de conversoes")
+        elif dias_ult <= 7:
+            score += 25
+            partes.append(f"ultima conversao ha {dias_ult}d (muito recente)")
+        elif dias_ult <= 14:
+            score += 18
+            partes.append(f"ultima conversao ha {dias_ult}d")
+        elif dias_ult <= 30:
             score += 10
-            partes.append("ultima interacao com algum atraso")
+            partes.append(f"ultima conversao ha {dias_ult}d")
+        elif dias_ult <= 60:
+            score += 4
+            partes.append(f"ultima conversao ha {dias_ult}d (esfriando)")
         else:
-            partes.append("sem interacoes recentes")
+            partes.append(f"ultima conversao ha {dias_ult}d (lead frio)")
 
-        # Velocidade de progressão (conversoes RECENTES — ultimos 30/90d).
-        # Antes o codigo usava total_conversoes cumulativo, o que
-        # classificava como "alta velocidade" um lead com 15 conversoes
-        # historicas sem atividade recente. Velocidade = movimento real
-        # no funil, nao historia.
+        # --- Interacoes ativas em 30 dias (0..35) ---
+        # Participacao em eventos/webinars = sinal forte de intencao.
+        # Download de material = sinal medio.
+        # Newsletter = sinal fraco (normalmente automatico).
+        interacoes = {}
+        if perfil_squad1:
+            interacoes = perfil_squad1.get("interacoes_conteudo", {}) or {}
+
+        eventos_30 = (interacoes.get("eventos_30d", 0) or 0) + (interacoes.get("webinars_30d", 0) or 0)
+        materiais_30 = interacoes.get("materiais_30d", 0) or 0
+        newsletters_30 = interacoes.get("newsletters_30d", 0) or 0
+        formularios_30 = interacoes.get("formularios_30d", 0) or 0
+
+        bonus_interacoes = 0
+        detalhes_interacoes: list[str] = []
+        if eventos_30 >= 2:
+            bonus_interacoes += 25
+            detalhes_interacoes.append(f"{eventos_30} participacoes em eventos/webinars")
+        elif eventos_30 == 1:
+            bonus_interacoes += 15
+            detalhes_interacoes.append("1 participacao em evento/webinar")
+        if materiais_30 >= 1:
+            bonus_interacoes += min(10, materiais_30 * 5)
+            detalhes_interacoes.append(f"{materiais_30} download(s) de material")
+        if formularios_30 >= 1:
+            bonus_interacoes += min(8, formularios_30 * 4)
+            detalhes_interacoes.append(f"{formularios_30} formulario(s) preenchido(s)")
+        if newsletters_30 >= 3:
+            bonus_interacoes += 3
+            detalhes_interacoes.append(f"{newsletters_30} newsletters consumidas")
+
+        bonus_interacoes = min(bonus_interacoes, 35)
+        score += bonus_interacoes
+        if detalhes_interacoes:
+            partes.append("em 30 dias: " + ", ".join(detalhes_interacoes))
+        elif dias_ult is not None and dias_ult <= 30:
+            partes.append("sem interacoes ativas (apenas registros passivos)")
+
+        # --- Velocidade no funil (0..15) ---
         if perfil_squad1:
             metricas = perfil_squad1.get("metricas_engajamento", {}) or {}
             conv_30d = metricas.get("conversoes_ultimos_30d", 0) or 0
-            conv_90d = metricas.get("conversoes_ultimos_90d", 0) or 0
-            total_conv = metricas.get("total_conversoes", 0) or 0
-            dias_ult = metricas.get("dias_desde_ultima_conversao")
-
-            if conv_30d >= 3:
-                score += 25
-                partes.append(f"alta velocidade ({conv_30d} conversoes em 30 dias)")
-            elif conv_30d >= 1:
+            if conv_30d >= 4:
                 score += 15
-                partes.append(f"{conv_30d} conversao(s) nos ultimos 30 dias")
-            elif conv_90d >= 1:
-                score += 8
-                partes.append(f"{conv_90d} conversao(s) nos ultimos 90 dias")
-            elif total_conv >= 1 and dias_ult is not None:
-                partes.append(f"{total_conv} conversao(s) historicas (ultima ha {dias_ult}d)")
-            else:
-                partes.append("sem conversoes registradas")
+                partes.append(f"alta velocidade ({conv_30d} conversoes em 30d)")
+            elif conv_30d >= 2:
+                score += 10
+                partes.append(f"{conv_30d} conversoes em 30d")
+            elif conv_30d >= 1:
+                score += 5
 
         razao = "; ".join(partes).capitalize() + "."
         return min(score, 100), razao

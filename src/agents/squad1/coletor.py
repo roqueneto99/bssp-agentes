@@ -239,6 +239,8 @@ Responda APENAS com JSON:
         perfil["analise_conteudos"] = self._analisar_historico_conteudos(
             perfil["historico_conversoes"]
         )
+        # Alias: pipeline.py e Squad 2 leem "interacoes_conteudo".
+        perfil["interacoes_conteudo"] = perfil["analise_conteudos"]
 
         # --- 7. Identificar dados faltantes ---
         perfil["dados_faltantes"] = self._identificar_dados_faltantes(perfil)
@@ -471,7 +473,8 @@ Responda APENAS com JSON:
 
     def _analisar_historico_conteudos(self, conversoes: list[dict]) -> dict:
         """
-        Analisa os nomes das conversões para extrair temas de interesse.
+        Analisa os nomes das conversões para extrair temas de interesse
+        e contadores por tipo (total + ultimos 30/90 dias).
 
         Os conversion_identifiers do RD Station contêm nomes de:
         - Newsletters (ex: "NEWSLETTER 13-2026")
@@ -484,9 +487,18 @@ Responda APENAS com JSON:
         na interface web. Os conversion_identifiers são nossa melhor
         proxy para entender com que conteúdos o lead interagiu.
         """
+        now = datetime.utcnow()
         temas = []
+        # Totais historicos (mantido para compatibilidade com enriquecedor)
         tipos_conteudo = {"newsletter": 0, "evento": 0, "material": 0,
                          "formulario": 0, "webinar": 0, "outro": 0}
+        # Janelas recentes (para o Scorer calcular Timing corretamente)
+        tipos_30d = {"newsletter": 0, "evento": 0, "material": 0,
+                     "formulario": 0, "webinar": 0, "outro": 0}
+        tipos_90d = {"newsletter": 0, "evento": 0, "material": 0,
+                     "formulario": 0, "webinar": 0, "outro": 0}
+        total_30d = 0
+        total_90d = 0
         conteudos_detalhados = []
 
         for c in conversoes:
@@ -500,17 +512,36 @@ Responda APENAS com JSON:
 
             # Classificar tipo de conteúdo
             if "newsletter" in ci_lower or "news" in ci_lower:
-                tipos_conteudo["newsletter"] += 1
+                tipo = "newsletter"
             elif "evento" in ci_lower or "[evento]" in ci_lower or "workshop" in ci_lower:
-                tipos_conteudo["evento"] += 1
+                tipo = "evento"
             elif "webinar" in ci_lower or "live" in ci_lower:
-                tipos_conteudo["webinar"] += 1
+                tipo = "webinar"
             elif "ebook" in ci_lower or "material" in ci_lower or "download" in ci_lower or "[des]" in ci_lower:
-                tipos_conteudo["material"] += 1
+                tipo = "material"
             elif "form" in ci_lower or "inscri" in ci_lower or "cadastr" in ci_lower:
-                tipos_conteudo["formulario"] += 1
+                tipo = "formulario"
             else:
-                tipos_conteudo["outro"] += 1
+                tipo = "outro"
+            tipos_conteudo[tipo] += 1
+
+            # Se tem timestamp, classificar na janela temporal
+            dias = None
+            if ts:
+                try:
+                    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    # Remove tz para comparar com now (naive)
+                    if dt.tzinfo is not None:
+                        dt = dt.replace(tzinfo=None)
+                    dias = (now - dt).days
+                    if dias <= 30:
+                        tipos_30d[tipo] += 1
+                        total_30d += 1
+                    if dias <= 90:
+                        tipos_90d[tipo] += 1
+                        total_90d += 1
+                except (ValueError, TypeError):
+                    pass
 
             # Extrair temas/palavras-chave dos nomes
             # Remove prefixos comuns como [EVENTO], [DES], [EMAIL X]
@@ -546,12 +577,40 @@ Responda APENAS com JSON:
 
         temas_unicos.sort(key=lambda x: x["count"], reverse=True)
 
+        # Estrutura retornada contem AMBOS os formatos:
+        #  - Campos historicos (ex: engajamento_eventos) que o enriquecedor
+        #    ja consome.
+        #  - Campos padronizados (newsletters, eventos, webinars, ...) que
+        #    o Squad 2 (Analisador/Scorer/Classificador) espera.
+        # Antes havia uma inconsistencia de chaves que fazia os consumidores
+        # do Squad 2 sempre receberem {} e dar 0 interacoes.
         return {
             "tipos_conteudo_interagido": {k: v for k, v in tipos_conteudo.items() if v > 0},
             "total_interacoes_conteudo": len(conversoes),
             "temas_interesse": [t["tema"] for t in temas_unicos[:8]],
             "tema_mais_frequente": temas_unicos[0]["tema"] if temas_unicos else "",
-            "conteudos_detalhados": conteudos_detalhados[:15],  # até 15 mais recentes
+            "conteudos_detalhados": conteudos_detalhados[:15],
+            # Totais historicos (plural, nomes usados pelo Squad 2)
+            "newsletters": tipos_conteudo["newsletter"],
+            "eventos": tipos_conteudo["evento"],
+            "webinars": tipos_conteudo["webinar"],
+            "materiais": tipos_conteudo["material"],
+            "formularios": tipos_conteudo["formulario"],
+            # Ultimos 30 dias (usados no Timing para "atividade recente real")
+            "newsletters_30d": tipos_30d["newsletter"],
+            "eventos_30d": tipos_30d["evento"],
+            "webinars_30d": tipos_30d["webinar"],
+            "materiais_30d": tipos_30d["material"],
+            "formularios_30d": tipos_30d["formulario"],
+            "total_30d": total_30d,
+            # Ultimos 90 dias
+            "newsletters_90d": tipos_90d["newsletter"],
+            "eventos_90d": tipos_90d["evento"],
+            "webinars_90d": tipos_90d["webinar"],
+            "materiais_90d": tipos_90d["material"],
+            "formularios_90d": tipos_90d["formulario"],
+            "total_90d": total_90d,
+            # Aliases mantidos para o enriquecedor que ja usa essas keys
             "engajamento_newsletter": tipos_conteudo["newsletter"],
             "engajamento_eventos": tipos_conteudo["evento"] + tipos_conteudo["webinar"],
             "engajamento_materiais": tipos_conteudo["material"],
