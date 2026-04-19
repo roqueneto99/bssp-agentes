@@ -339,12 +339,24 @@ class ClassificadorRotaAgent:
             briefing["area_interesse"] = analysis.get("area_principal", "")
             briefing["cursos_sugeridos"] = analysis.get("cursos_sugeridos", [])
             briefing["resumo_perfil"] = analysis.get("resumo_perfil", "")
+            # Fallback: Squad 1 sugeriu um proximo_passo SEM saber do score.
+            # Em geral preferimos o do Scorer (alinhado), preenchido abaixo.
             briefing["proximo_passo_sugerido"] = analysis.get("proximo_passo", "")
 
         if scoring:
             briefing["score"] = scoring.get("score_total", 0)
             briefing["classificacao"] = scoring.get("classificacao", "")
             briefing["resumo_scoring"] = scoring.get("resumo", "")
+
+            # Preferir o proximo_passo alinhado ao score (gerado pelo Scorer
+            # APOS calcular score_total). O do Squad 1 fica como fallback
+            # caso o Scorer nao tenha gerado (ex.: fluxo legado, fallback heuristico).
+            scorer_proximo = scoring.get("proximo_passo")
+            if scorer_proximo:
+                briefing["proximo_passo_sugerido"] = scorer_proximo
+            briefing["narrativa_alinhada_ao_score"] = bool(
+                scoring.get("narrativa_alinhada", False)
+            )
 
             # Pontos fortes (dimensões com score alto)
             dimensoes = scoring.get("dimensoes", {})

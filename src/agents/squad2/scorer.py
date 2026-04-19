@@ -62,6 +62,72 @@ CLASSIFICACAO = [
     (0, "COLD"),   # Lead frio
 ]
 
+# -------------------------------------------------------------------
+# Vocabulario permitido/proibido por classificacao — usado na geracao
+# de narrativa alinhada. Evita o viés otimista no briefing comercial
+# em que leads MQL/SAL/COLD recebiam recomendações de "contato imediato"
+# apesar do score real não justificar.
+# -------------------------------------------------------------------
+TOM_POR_CLASSE: dict[str, dict] = {
+    "SQL": {
+        "descricao": "Lead pronto para handoff ao consultor comercial (score ≥ 75).",
+        "acao_recomendada": "Contato comercial prioritário em até 2h pelo canal preferido do lead.",
+        "vocab_permitido": [
+            "contato imediato", "priorizar", "pronto para abordagem",
+            "forte intenção", "alto engajamento",
+        ],
+        "vocab_proibido": [],
+    },
+    "MQL": {
+        "descricao": "Lead morno-quente em nutrição avançada (score 50-74).",
+        "acao_recomendada": (
+            "Inserir em fluxo de nutrição avançada (conteúdo aprofundado da área), "
+            "NÃO acionar consultor ainda. Re-avaliar em 7 dias."
+        ),
+        "vocab_permitido": [
+            "nutrir", "avançar na jornada", "aprofundar interesse",
+            "engajamento moderado a alto", "potencial",
+        ],
+        "vocab_proibido": [
+            "imediato", "imediatamente", "priorizar", "priorizado",
+            "urgente", "excepcional", "pronto para contato",
+            "contato comercial imediato", "deve ser priorizado",
+        ],
+    },
+    "SAL": {
+        "descricao": "Lead com interesse parcial — nutrição básica (score 35-49).",
+        "acao_recomendada": (
+            "Inserir em fluxo de nutrição básica (emails educativos sobre a área). "
+            "NÃO acionar consultor. Re-avaliar em 14 dias."
+        ),
+        "vocab_permitido": [
+            "nutrir", "educar", "acompanhar", "potencial moderado",
+            "interesse parcial", "engajamento limitado",
+        ],
+        "vocab_proibido": [
+            "imediato", "imediatamente", "priorizar", "priorizado",
+            "urgente", "excepcional", "forte intenção", "altíssimo",
+            "pronto para", "contato comercial", "deve ser priorizado",
+            "alto engajamento", "alta prioridade",
+        ],
+    },
+    "COLD": {
+        "descricao": "Lead frio — manter na base, re-engajar via campanha geral (score < 35).",
+        "acao_recomendada": (
+            "Manter na base — incluir em campanha de re-engajamento em 30-60 dias. "
+            "Sem ação comercial direta."
+        ),
+        "vocab_permitido": [
+            "re-engajar", "reciclar", "dados limitados", "baixo engajamento",
+            "interesse não confirmado",
+        ],
+        "vocab_proibido": [
+            "imediato", "priorizar", "urgente", "excepcional", "forte",
+            "alto", "pronto para", "contato", "priorizado", "interessado",
+        ],
+    },
+}
+
 # Valores de lifecycle_stage que significam "já é aluno/cliente da BSSP".
 # Em portugues no RD Station, o valor padrao e "Cliente". Cobrimos tambem
 # variantes em ingles.
@@ -250,27 +316,48 @@ class ScorerAgent:
                 classificacao = label
                 break
 
+        dimensoes = {
+            "fit": {"score": fit_score, "peso": pesos["fit"], "razao": fit_razao},
+            "interest": {"score": interest_score, "peso": pesos["interest"], "razao": interest_razao},
+            "engagement": {
+                "score": engagement_score,
+                "peso": pesos["engagement"],
+                "razao": engagement_razao,
+                # Breakdown detalhado das 7 sub-dimensoes do engajamento
+                # (atividade_recente, recencia, profundidade, volume,
+                # responsividade, multicanalidade, completude). A UI
+                # pode expandir e mostrar cada uma com seu score/peso.
+                "sub_dimensoes": engagement_detalhe,
+            },
+            "timing": {"score": timing_score, "peso": pesos["timing"], "razao": timing_razao},
+        }
+
+        # =============================================================
+        # NARRATIVA ALINHADA AO SCORE (gerada APOS calcular score_total)
+        # =============================================================
+        # Corrige viés otimista: o resumo_llm inicial e gerado SEM saber
+        # do score final, o que fazia briefings de MQL/SAL saírem com
+        # linguagem de SQL ("contato imediato", "priorizar", "excepcional").
+        # Aqui rodamos uma segunda chamada ja com o score calculado e
+        # com regras explicitas de vocabulario por classe.
+        narrativa = await self._gerar_narrativa_alinhada(
+            email=email,
+            score_total=score_total,
+            classificacao=classificacao,
+            dimensoes=dimensoes,
+            perfil_squad1=perfil_squad1,
+            fallback_resumo=resumo_llm,
+        )
+
         return {
             "email": email,
             "timestamp": now.isoformat(),
             "score_total": score_total,
             "classificacao": classificacao,
-            "dimensoes": {
-                "fit": {"score": fit_score, "peso": pesos["fit"], "razao": fit_razao},
-                "interest": {"score": interest_score, "peso": pesos["interest"], "razao": interest_razao},
-                "engagement": {
-                    "score": engagement_score,
-                    "peso": pesos["engagement"],
-                    "razao": engagement_razao,
-                    # Breakdown detalhado das 7 sub-dimensoes do engajamento
-                    # (atividade_recente, recencia, profundidade, volume,
-                    # responsividade, multicanalidade, completude). A UI
-                    # pode expandir e mostrar cada uma com seu score/peso.
-                    "sub_dimensoes": engagement_detalhe,
-                },
-                "timing": {"score": timing_score, "peso": pesos["timing"], "razao": timing_razao},
-            },
-            "resumo": resumo_llm,
+            "dimensoes": dimensoes,
+            "resumo": narrativa["resumo"],
+            "proximo_passo": narrativa["proximo_passo"],
+            "narrativa_alinhada": narrativa.get("origem") == "llm_alinhado",
             "sinais_engajamento": (engajamento or {}).get("sinais_comportamentais", []),
         }
 
@@ -546,6 +633,121 @@ RESPONDA APENAS COM JSON VÁLIDO, sem markdown."""
             logger.warning("LLM scoring falhou para %s: %s — usando heurística", email, e)
             return self._fallback_heuristico(perfil_squad1, engajamento)
 
+    # ------------------------------------------------------------------
+    # Narrativa alinhada ao score (resumo + proximo_passo coerentes)
+    # ------------------------------------------------------------------
+
+    async def _gerar_narrativa_alinhada(
+        self,
+        *,
+        email: str,
+        score_total: int,
+        classificacao: str,
+        dimensoes: dict,
+        perfil_squad1: dict | None,
+        fallback_resumo: str,
+    ) -> dict:
+        """
+        Gera (resumo, proximo_passo) coerentes com a faixa de score.
+
+        Roda DEPOIS do calculo de score_total. Injeta a classificacao e
+        as regras de tom no prompt do LLM — evita que briefings de
+        MQL/SAL/COLD saiam com vocabulario de SQL.
+
+        Em caso de falha do LLM, retorna o resumo original + um
+        proximo_passo deterministico pela classe (TOM_POR_CLASSE).
+        """
+        tom = TOM_POR_CLASSE.get(classificacao, TOM_POR_CLASSE["COLD"])
+
+        # Montar contexto compacto com os 4 scores e razoes
+        dados_basicos = (perfil_squad1 or {}).get("dados_basicos", {}) or {}
+        analysis = (perfil_squad1 or {}).get("analysis", {}) or {}
+
+        contexto = [
+            f"LEAD: {email}",
+            f"  Nome:  {dados_basicos.get('name', 'N/A')}",
+            f"  Cargo: {dados_basicos.get('job_title', 'N/A')}",
+            f"  Área:  {analysis.get('area_principal', 'N/A')}",
+            "",
+            f"CLASSIFICAÇÃO FINAL: {classificacao} (score {score_total}/100)",
+            f"  Fit:        {dimensoes['fit']['score']}/100 — {dimensoes['fit']['razao']}",
+            f"  Interest:   {dimensoes['interest']['score']}/100 — {dimensoes['interest']['razao']}",
+            f"  Engagement: {dimensoes['engagement']['score']}/100 — {dimensoes['engagement']['razao']}",
+            f"  Timing:     {dimensoes['timing']['score']}/100 — {dimensoes['timing']['razao']}",
+        ]
+        contexto_str = "\n".join(contexto)
+
+        vocab_proibido = ", ".join(f'"{v}"' for v in tom["vocab_proibido"]) or "(nenhum)"
+        vocab_permitido = ", ".join(f'"{v}"' for v in tom["vocab_permitido"])
+
+        system_prompt = f"""Você é redator técnico de briefings comerciais em uma instituição de pós-graduação.
+
+Sua ÚNICA tarefa é escrever o resumo e o próximo passo de um lead JÁ classificado, com tom EXATAMENTE alinhado à classificação. Não reavalie o score. Não discorde da classificação.
+
+CLASSIFICAÇÃO DESTE LEAD: {classificacao} — {tom['descricao']}
+
+AÇÃO RECOMENDADA PARA ESTA CLASSE: {tom['acao_recomendada']}
+
+REGRAS DE VOCABULÁRIO (obrigatórias):
+- NÃO use os termos: {vocab_proibido}
+- Prefira termos como: {vocab_permitido}
+
+REGRAS DE CONTEÚDO:
+- Seja factual. Se dados são incompletos, diga "dados incompletos"; não invente interesse.
+- O próximo_passo DEVE refletir a ação recomendada acima — não recomende "contato comercial imediato" se a classe é MQL/SAL/COLD.
+- Se o score foi rebaixado por engajamento baixo ou timing ruim, o resumo deve mencionar essa limitação.
+
+Retorne JSON com exatamente estas chaves:
+{{
+  "resumo": "2-3 frases descrevendo o lead, coerentes com a classificação {classificacao}.",
+  "proximo_passo": "1 frase objetiva com a ação concreta, alinhada à classe {classificacao}."
+}}
+
+RESPONDA APENAS COM JSON VÁLIDO, sem markdown."""
+
+        try:
+            result = await self.llm.complete_json(
+                messages=[LLMMessage(role="user", content=contexto_str)],
+                system=system_prompt,
+                temperature=0.0,
+            )
+            resumo = str(result.get("resumo", "")).strip()
+            proximo = str(result.get("proximo_passo", "")).strip()
+            if not resumo or not proximo:
+                raise ValueError("LLM retornou campos vazios")
+
+            # Validador de coerencia: se algum termo proibido aparecer,
+            # reforça o fallback deterministico ao inves de deixar passar.
+            texto_completo = f"{resumo} {proximo}".lower()
+            violou = [v for v in tom["vocab_proibido"] if v.lower() in texto_completo]
+            if violou:
+                logger.warning(
+                    "Narrativa de %s violou vocabulário proibido (%s) — usando fallback",
+                    email, violou,
+                )
+                return {
+                    "resumo": fallback_resumo or f"Lead classificado como {classificacao}.",
+                    "proximo_passo": tom["acao_recomendada"],
+                    "origem": "fallback_vocab_violado",
+                }
+
+            return {
+                "resumo": resumo,
+                "proximo_passo": proximo,
+                "origem": "llm_alinhado",
+            }
+
+        except Exception as e:
+            logger.warning(
+                "Narrativa alinhada falhou para %s: %s — usando fallback deterministico",
+                email, e,
+            )
+            return {
+                "resumo": fallback_resumo or f"Lead classificado como {classificacao}.",
+                "proximo_passo": tom["acao_recomendada"],
+                "origem": "fallback_erro_llm",
+            }
+
     def _fallback_heuristico(
         self,
         perfil_squad1: dict | None,
@@ -591,5 +793,7 @@ RESPONDA APENAS COM JSON VÁLIDO, sem markdown."""
             "interest_score": min(interest, 100),
             "fit_razao": "Avaliação heurística (LLM indisponível)",
             "interest_razao": "Avaliação heurística (LLM indisponível)",
+            # Este resumo serve apenas como FALLBACK, se a narrativa
+            # alinhada (_gerar_narrativa_alinhada) tambem falhar.
             "resumo": "Scoring baseado em heurísticas — LLM temporariamente indisponível",
         }
