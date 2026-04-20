@@ -19,7 +19,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -68,6 +68,38 @@ CACHE_TTL = 600  # 10 minutos
 # quanto pelo /api/leads (para resolver o nome quando filtra por seg_id).
 _segs_list_cache: dict = {"data": None, "ts": 0.0}
 _SEGS_LIST_TTL = 600  # 10 minutos
+
+# --- Auto-sync scheduler ---
+# Garante que o Postgres esteja sempre <= SYNC_INTERVAL_HOURS atrasado em relacao
+# ao RD Station, sem depender de cron externo. Painel.py roda 24/7 no Railway,
+# entao um loop interno eh suficiente.
+SYNC_AUTO_ENABLED = os.getenv("SYNC_AUTO_ENABLED", "true").lower() in ("1", "true", "yes")
+SYNC_INTERVAL_HOURS = int(os.getenv("SYNC_INTERVAL_HOURS", "4"))
+# Janela maior que o intervalo da uma margem de seguranca (caso uma execucao
+# atrase ou falhe, a proxima ainda cobre o gap).
+SYNC_HOURS_WINDOW = int(os.getenv("SYNC_HOURS_WINDOW", "6"))
+# Full_sync de reconciliacao: por padrao, domingo 03:00 BRT (= 06:00 UTC).
+SYNC_FULL_WEEKDAY_UTC = int(os.getenv("SYNC_FULL_WEEKDAY_UTC", "6"))  # 0=seg..6=dom
+SYNC_FULL_HOUR_UTC = int(os.getenv("SYNC_FULL_HOUR_UTC", "6"))
+
+_sync_lock = asyncio.Lock()
+_sync_task: Optional[asyncio.Task] = None
+_sync_status: dict = {
+    "auto_enabled": SYNC_AUTO_ENABLED,
+    "interval_hours": SYNC_INTERVAL_HOURS,
+    "hours_window": SYNC_HOURS_WINDOW,
+    "full_weekday_utc": SYNC_FULL_WEEKDAY_UTC,
+    "full_hour_utc": SYNC_FULL_HOUR_UTC,
+    "running": False,
+    "last_run_at": None,
+    "last_run_mode": None,
+    "last_run_status": None,
+    "last_run_contacts": None,
+    "last_run_error": None,
+    "next_run_at": None,
+    "total_runs": 0,
+    "total_errors": 0,
+}
 
 
 async def _get_segs_list(force: bool = False) -> list[dict]:
@@ -189,11 +221,29 @@ async def startup():
         DATA_MODE = "api"
         logger.info("Modo API ativo — consultas diretas ao RD Station")
 
+    # Scheduler interno: mantem o Postgres atualizado sem depender de cron externo.
+    # Exige modo DATABASE ativo + client RD disponivel.
+    global _sync_task
+    if DATA_MODE == "database" and rdstation is not None and SYNC_AUTO_ENABLED:
+        _sync_task = asyncio.create_task(_auto_sync_loop())
+        logger.info("Task de auto-sync agendada")
+    elif not SYNC_AUTO_ENABLED:
+        logger.info("Auto-sync desabilitado via SYNC_AUTO_ENABLED=false")
+    elif DATA_MODE != "database":
+        logger.info("Auto-sync inativo — modo atual: %s", DATA_MODE)
+
     logger.info("Painel iniciado (modo: %s)", DATA_MODE)
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    global _sync_task
+    if _sync_task is not None and not _sync_task.done():
+        _sync_task.cancel()
+        try:
+            await _sync_task
+        except (asyncio.CancelledError, Exception):
+            pass
     if rdstation:
         await rdstation.close()
     if llm:
@@ -902,6 +952,102 @@ async def db_mode():
     return {"mode": DATA_MODE}
 
 
+async def _execute_sync(mode: str, hours: int) -> dict:
+    """Executa um sync (full ou incremental) e atualiza _sync_status.
+
+    Usa _sync_lock para evitar duas execucoes simultaneas (manual + agendada).
+    Nao levanta excecao — registra o erro no status e retorna.
+    """
+    if _sync_lock.locked():
+        logger.info("Sync ja em andamento — pulando disparo (%s)", mode)
+        return {"status": "skipped", "reason": "already_running", "mode": mode}
+
+    from src.database.sync import full_sync, incremental_sync
+
+    async with _sync_lock:
+        _sync_status["running"] = True
+        _sync_status["last_run_mode"] = mode
+        _sync_status["last_run_error"] = None
+        started = datetime.now(timezone.utc)
+        try:
+            if mode == "full":
+                result = await full_sync()
+            else:
+                result = await incremental_sync(since_hours=hours)
+            _sync_status["last_run_status"] = result.get("status", "unknown")
+            _sync_status["last_run_contacts"] = result.get("total_contacts", 0)
+            _sync_status["total_runs"] += 1
+            logger.info(
+                "Sync %s concluido: %s (%s leads)",
+                mode, _sync_status["last_run_status"],
+                _sync_status["last_run_contacts"],
+            )
+            return result
+        except Exception as e:
+            _sync_status["last_run_status"] = "failed"
+            _sync_status["last_run_error"] = str(e)[:500]
+            _sync_status["total_errors"] += 1
+            logger.error("Erro no sync %s: %s", mode, e, exc_info=True)
+            return {"status": "failed", "error": str(e)}
+        finally:
+            _sync_status["running"] = False
+            _sync_status["last_run_at"] = started.isoformat()
+
+
+async def _auto_sync_loop():
+    """Loop eterno do scheduler: dispara incremental a cada SYNC_INTERVAL_HOURS
+    e full_sync no dia/hora UTC configurados (reconciliacao semanal).
+
+    Tolerante a falhas: se um sync levantar, o loop continua.
+    """
+    if not SYNC_AUTO_ENABLED:
+        logger.info("Auto-sync desabilitado (SYNC_AUTO_ENABLED=false)")
+        return
+
+    logger.info(
+        "Auto-sync habilitado — incremental a cada %dh (janela %dh), "
+        "full semanal aos weekday=%d %02d:00 UTC",
+        SYNC_INTERVAL_HOURS, SYNC_HOURS_WINDOW,
+        SYNC_FULL_WEEKDAY_UTC, SYNC_FULL_HOUR_UTC,
+    )
+
+    # Pequeno atraso inicial para o startup terminar de estabilizar (migrations,
+    # conexoes, etc.) antes de bater na API externa.
+    await asyncio.sleep(60)
+
+    # Controla o ultimo dia em que o full rodou para nao repetir dentro do mesmo dia.
+    last_full_day: Optional[str] = None
+
+    while True:
+        now = datetime.now(timezone.utc)
+
+        # Decide se eh hora de um full_sync (uma vez por semana no slot configurado)
+        is_full_slot = (
+            now.weekday() == SYNC_FULL_WEEKDAY_UTC
+            and now.hour == SYNC_FULL_HOUR_UTC
+            and last_full_day != now.date().isoformat()
+        )
+
+        mode = "full" if is_full_slot else "incremental"
+        try:
+            await _execute_sync(mode=mode, hours=SYNC_HOURS_WINDOW)
+            if mode == "full":
+                last_full_day = now.date().isoformat()
+        except Exception as e:
+            logger.error("Exception no loop de auto-sync: %s", e, exc_info=True)
+
+        # Proximo disparo
+        sleep_seconds = SYNC_INTERVAL_HOURS * 3600
+        next_run = datetime.now(timezone.utc) + timedelta(seconds=sleep_seconds)
+        _sync_status["next_run_at"] = next_run.isoformat()
+
+        try:
+            await asyncio.sleep(sleep_seconds)
+        except asyncio.CancelledError:
+            logger.info("Auto-sync loop cancelado")
+            raise
+
+
 @app.post("/api/db/sync")
 async def trigger_sync(
     mode: str = Query(default="incremental"),
@@ -911,19 +1057,14 @@ async def trigger_sync(
     if DATA_MODE != "database":
         raise HTTPException(400, "PostgreSQL não configurado")
 
-    from src.database.sync import full_sync, incremental_sync
-
-    async def _run_sync():
-        try:
-            if mode == "full":
-                await full_sync()
-            else:
-                await incremental_sync(since_hours=hours)
-        except Exception as e:
-            logger.error("Erro no sync background: %s", e)
-
-    asyncio.create_task(_run_sync())
+    asyncio.create_task(_execute_sync(mode=mode, hours=hours))
     return {"status": "started", "mode": mode}
+
+
+@app.get("/api/db/sync/status")
+async def sync_status():
+    """Retorna status do auto-sync: ultima execucao, proxima, totais, etc."""
+    return _sync_status
 
 
 # --- Frontend ---
