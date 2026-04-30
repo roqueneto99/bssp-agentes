@@ -368,13 +368,32 @@ class RDStationClient:
 
         Squad 1: marca origem (fonte_webinar, fonte_ebook)
         Squad 2: marca resultado do scoring (quente, morno, frio)
+
+        Defesa: o RD Station rejeita tags com maiúsculas
+        (VALUES_MUST_BE_LOWERCASE). Normalizamos aqui para isolar
+        os callers — qualquer tag com letra grande (ex.: vinda do
+        LLM no Enriquecedor com 'Alta' ou 'Quente') cai em lowercase
+        + strip antes do POST. Tags vazias são descartadas.
         """
+        normalized = [t.strip().lower() for t in (tags or []) if t and t.strip()]
+        if not normalized:
+            logger.debug("add_tags: lista vazia para %s, ignorando", email)
+            return Contact.from_api_response({"email": email})
+
+        # Log se houve transformação de caixa
+        original_clean = [t.strip() for t in (tags or []) if t and t.strip()]
+        if normalized != original_clean:
+            logger.info(
+                "add_tags: normalizou tags para %s: %s -> %s",
+                email, original_clean, normalized,
+            )
+
         data = await self._request(
             "POST",
             f"/platform/contacts/email:{email}/tag",
             rate_limit_resource="tags_account",
             rate_limit_entity=email,
-            json={"tags": tags},
+            json={"tags": normalized},
         )
 
         # Consome cota per-lead de tags
