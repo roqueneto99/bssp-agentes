@@ -49,3 +49,12 @@ _arquivados_*/
 # --- Backups automáticos ---
 *.bak.*
 *.bak
+# ==== Frontend (Next.js) ====
+frontend/node_modules/
+frontend/.next/
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+frontend/coverage/
+frontend/*.tsbuildinfo
+frontend/_tmp_*
