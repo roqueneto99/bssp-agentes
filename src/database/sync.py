@@ -363,6 +363,7 @@ async def incremental_sync(
         "total_pages": 0,
         "total_contacts": 0,
         "new_contacts": 0,
+        "updated_contacts": 0,
         "errors": 0,
     }
 
@@ -425,9 +426,11 @@ async def incremental_sync(
             await session.execute(
                 text("""
                     INSERT INTO sync_log (tipo, started_at, finished_at,
-                        total_pages, total_contacts, new_contacts, errors, status)
+                        total_pages, total_contacts, new_contacts,
+                        updated_contacts, errors, status)
                     VALUES (:tipo, :started_at, :finished_at,
-                        :total_pages, :total_contacts, :new_contacts, :errors, :status)
+                        :total_pages, :total_contacts, :new_contacts,
+                        :updated_contacts, :errors, :status)
                 """),
                 {
                     "tipo": "incremental",
@@ -436,6 +439,7 @@ async def incremental_sync(
                     "total_pages": stats["total_pages"],
                     "total_contacts": stats["total_contacts"],
                     "new_contacts": stats["new_contacts"],
+                    "updated_contacts": stats.get("updated_contacts", 0),
                     "errors": stats["errors"],
                     "status": "completed",
                 },
