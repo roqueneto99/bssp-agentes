@@ -259,6 +259,20 @@ async def startup():
     db_url = os.getenv("DATABASE_URL", "")
     if db_url:
         try:
+            # 1) Aplicar migrations SQL pendentes (idempotente — todos os
+            #    CREATEs usam IF NOT EXISTS). Roda antes do init_db pois cria
+            #    tabelas/colunas que os modelos SQLAlchemy não cobrem (ex.: Squad 3).
+            try:
+                from scripts.run_migrations import main as run_migrations
+                rc = await run_migrations()
+                if rc != 0:
+                    logger.warning("run_migrations retornou código %s — seguindo mesmo assim", rc)
+                else:
+                    logger.info("Migrations SQL aplicadas com sucesso")
+            except Exception as mig_exc:  # noqa: BLE001
+                logger.warning("Falha ao aplicar migrations SQL: %s — seguindo com create_all", mig_exc)
+
+            # 2) Cria/verifica as tabelas dos modelos SQLAlchemy (idempotente).
             from src.database.connection import init_db
             await init_db()
             DATA_MODE = "database"
