@@ -1,0 +1,14 @@
+{
+  "id": "tpl_v1_prova_social",
+  "version": "v1",
+  "nudge": "prova_social",
+  "canal": "email",
+  "assunto": "{nome_curto}, veja o que mais de 2.300 ex-alunos da BSSP relatam",
+  "corpo": "Olá {nome_curto},\n\nMais de 2.300 profissionais já concluíram pós-graduações na BSSP, e 89% reportam avanço na carreira em até 12 meses após a conclusão.\n\nSe quiser conversar sobre como o {curso} pode se encaixar no seu objetivo, estamos por aqui.\n\nEquipe BSSP",
+  "variaveis_obrigatorias": ["nome_curto"],
+  "variaveis_opcionais": ["curso"],
+  "tons_suportados": ["analitico", "impulsivo", "cauteloso"],
+  "aprovado_por": "roque@bssp.com.br",
+  "aprovado_em": "2026-04-29T09:00:00-03:00",
+  "observacoes": "v1 baseline — revisar com Diretoria de Marketing antes do ramp-up em produção"
+}

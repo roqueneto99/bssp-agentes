@@ -1,0 +1,14 @@
+{
+  "id": "tpl_v1_escassez",
+  "version": "v1",
+  "nudge": "escassez",
+  "canal": "email",
+  "assunto": "Restam poucas vagas — {curso} (turma {turma})",
+  "corpo": "Olá {nome_curto},\n\nA turma de {turma} do curso {curso} está nos seus últimos lugares. Se faz sentido para você, vale agarrar a vaga antes do encerramento.\n\nPosso te enviar a grade completa pelo WhatsApp?\n\nEquipe BSSP",
+  "variaveis_obrigatorias": ["nome_curto", "curso", "turma"],
+  "variaveis_opcionais": [],
+  "tons_suportados": ["analitico", "impulsivo", "cauteloso"],
+  "aprovado_por": "roque@bssp.com.br",
+  "aprovado_em": "2026-04-29T09:00:00-03:00",
+  "observacoes": "v1 baseline — revisar com Diretoria de Marketing antes do ramp-up em produção"
+}

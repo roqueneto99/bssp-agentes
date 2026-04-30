@@ -1,0 +1,14 @@
+{
+  "id": "tpl_v1_fechamento",
+  "version": "v1",
+  "nudge": "fechamento",
+  "canal": "whatsapp",
+  "assunto": "Vamos fechar sua matrícula em {curso}?",
+  "corpo": "Olá {nome_curto},\n\nPelos seus sinais nos últimos dias, parece que {curso} faz sentido. Posso te ligar hoje para fechar a matrícula da turma de {turma}?\n\nBSSP",
+  "variaveis_obrigatorias": ["nome_curto", "curso", "turma"],
+  "variaveis_opcionais": [],
+  "tons_suportados": ["analitico", "impulsivo", "cauteloso"],
+  "aprovado_por": "roque@bssp.com.br",
+  "aprovado_em": "2026-04-29T09:00:00-03:00",
+  "observacoes": "v1 baseline — revisar com Diretoria de Marketing antes do ramp-up em produção"
+}

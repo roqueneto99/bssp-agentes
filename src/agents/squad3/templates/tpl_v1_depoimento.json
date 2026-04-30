@@ -1,0 +1,14 @@
+{
+  "id": "tpl_v1_depoimento",
+  "version": "v1",
+  "nudge": "depoimento",
+  "canal": "whatsapp",
+  "assunto": "{nome_curto}, ouça quem já fez {curso} na BSSP",
+  "corpo": "Olá {nome_curto},\n\nSelecionamos três depoimentos curtos de ex-alunos do {curso} que falam sobre o que mudou na carreira deles. Em 5 minutos você sente o tom da turma.\n\nQuer que eu envie por aqui?\n\nBSSP",
+  "variaveis_obrigatorias": ["nome_curto", "curso"],
+  "variaveis_opcionais": [],
+  "tons_suportados": ["analitico", "impulsivo", "cauteloso"],
+  "aprovado_por": "roque@bssp.com.br",
+  "aprovado_em": "2026-04-29T09:00:00-03:00",
+  "observacoes": "v1 baseline — revisar com Diretoria de Marketing antes do ramp-up em produção"
+}

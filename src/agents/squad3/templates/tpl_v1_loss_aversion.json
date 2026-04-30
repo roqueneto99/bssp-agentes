@@ -1,0 +1,14 @@
+{
+  "id": "tpl_v1_loss_aversion",
+  "version": "v1",
+  "nudge": "loss_aversion",
+  "canal": "email",
+  "assunto": "{nome_curto}, profissionais sem especialização perdem oportunidades",
+  "corpo": "Olá {nome_curto},\n\nPesquisas internas mostram que profissionais sem especialização perdem em média 40% das oportunidades de promoção no setor. A próxima janela de matrículas da BSSP fecha em breve — se quiser, posso te ajudar a organizar a inscrição em {curso}.\n\nEquipe BSSP",
+  "variaveis_obrigatorias": ["nome_curto", "curso"],
+  "variaveis_opcionais": [],
+  "tons_suportados": ["analitico", "impulsivo", "cauteloso"],
+  "aprovado_por": "roque@bssp.com.br",
+  "aprovado_em": "2026-04-29T09:00:00-03:00",
+  "observacoes": "v1 baseline — revisar com Diretoria de Marketing antes do ramp-up em produção"
+}

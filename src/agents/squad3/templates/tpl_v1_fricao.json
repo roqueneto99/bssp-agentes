@@ -1,0 +1,14 @@
+{
+  "id": "tpl_v1_fricao",
+  "version": "v1",
+  "nudge": "fricao",
+  "canal": "whatsapp",
+  "assunto": "Te ligo agora? Só 2 minutos",
+  "corpo": "Olá {nome_curto},\n\nVi que você começou a inscrição em {curso} mas não finalizou. Posso responder qualquer dúvida em 2 minutos pelo WhatsApp — sem compromisso.\n\nBSSP",
+  "variaveis_obrigatorias": ["nome_curto", "curso"],
+  "variaveis_opcionais": [],
+  "tons_suportados": ["analitico", "impulsivo", "cauteloso"],
+  "aprovado_por": "roque@bssp.com.br",
+  "aprovado_em": "2026-04-29T09:00:00-03:00",
+  "observacoes": "v1 baseline — revisar com Diretoria de Marketing antes do ramp-up em produção"
+}

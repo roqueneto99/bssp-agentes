@@ -38,9 +38,6 @@ from src.agents.base import LLMProvider
 from src.agents.squad1.orchestrator import Squad1Orchestrator
 from src.agents.pipeline import AgentPipeline
 from src.integrations.hablla.client import HabllaClient
-from src.integrations.sendgrid import SendGridClient, SendGridConfig
-from src.database.queries_squad3 import MensagensRepository, NullMensagensRepo
-from src.webhooks import sendgrid_receiver as sendgrid_webhook
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 logger = logging.getLogger("painel")
@@ -54,8 +51,6 @@ llm: Optional[LLMProvider] = None
 orchestrator: Optional[Squad1Orchestrator] = None
 hablla: Optional[HabllaClient] = None
 pipeline: Optional[AgentPipeline] = None
-sendgrid: Optional[SendGridClient] = None
-mensagens_repo: Optional[object] = None
 
 # Modo de dados: "database" ou "api"
 DATA_MODE: str = "api"
@@ -141,13 +136,9 @@ async def _provisionar_custom_fields(rd: RDStationClient) -> None:
                 logger.warning("Erro ao criar custom field %s: %s", name, err)
 
 
-# Mount webhook routers
-app.include_router(sendgrid_webhook.router)
-
-
 @app.on_event("startup")
 async def startup():
-    global rdstation, llm, orchestrator, hablla, pipeline, DATA_MODE, sendgrid, mensagens_repo
+    global rdstation, llm, orchestrator, hablla, pipeline, DATA_MODE
 
     # --- RD Station (tolerante: se faltar credencial, segue sem o client) ---
     rd_client_id = os.getenv("RDSTATION_CLIENT_ID", "")
@@ -202,54 +193,13 @@ async def startup():
     else:
         logger.warning("HABLLA_API_TOKEN não configurado — Squad 2 rodará sem dados Hablla")
 
-    # SendGrid (opcional — só inicializa se a API key estiver presente)
-    sg_config = SendGridConfig.from_env()
-    if sg_config.is_configured:
-        sendgrid = SendGridClient(sg_config)
-        logger.info(
-            "SendGridClient inicializado (sandbox=%s, from=%s)",
-            sg_config.sandbox_mode, sg_config.from_email,
-        )
-    else:
-        sendgrid = None
-        logger.warning("SENDGRID_API_KEY ausente — Squad 3 rodará em dry-run para e-mail")
-
-    # Repositório de mensagens (só se DATABASE_URL existe)
-    db_url = os.getenv("DATABASE_URL", "")
-    if db_url:
-        try:
-            from src.database.connection import get_session_factory
-            mensagens_repo = MensagensRepository(get_session_factory())
-            logger.info("MensagensRepository conectado ao Postgres")
-        except Exception as e:
-            mensagens_repo = NullMensagensRepo()
-            logger.warning("MensagensRepository falhou (%s) — usando NullRepo", e)
-    else:
-        mensagens_repo = NullMensagensRepo()
-
-    # Pipeline completo (Squad 1 → Squad 2 → Squad 3)
+    # Pipeline completo (Squad 1 → Squad 2 → ...)
     if rdstation is not None:
-        pipeline = AgentPipeline(
-            llm=llm,
-            rdstation=rdstation,
-            hablla=hablla,
-            sendgrid=sendgrid,
-            mensagens_repo=mensagens_repo,
-            squad3_dry_run=(sendgrid is None),
-        )
-        logger.info(
-            "AgentPipeline inicializado (squad3_dry_run=%s)",
-            sendgrid is None,
-        )
+        pipeline = AgentPipeline(llm=llm, rdstation=rdstation, hablla=hablla)
+        logger.info("AgentPipeline inicializado")
     else:
         pipeline = None
         logger.warning("Pipeline não inicializado — RD Station ausente")
-
-    # Webhook SendGrid: configura singletons no módulo do receiver
-    sendgrid_webhook.configure(
-        sendgrid_client=sendgrid,
-        mensagens_repo=mensagens_repo,
-    )
 
     # Provisionar custom fields no RD Station (background, só se client existe)
     if rdstation is not None:

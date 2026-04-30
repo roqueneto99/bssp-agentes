@@ -1,0 +1,14 @@
+{
+  "id": "tpl_v1_educativa",
+  "version": "v1",
+  "nudge": "educativa",
+  "canal": "email",
+  "assunto": "Como escolher uma pós que faz sentido para sua carreira",
+  "corpo": "Olá {nome_curto},\n\nSeparamos um material curto sobre como avaliar uma pós considerando carreira, tempo e investimento. Pode te ajudar mesmo se a escolha final não for o {curso} da BSSP.\n\nEquipe BSSP",
+  "variaveis_obrigatorias": ["nome_curto", "curso"],
+  "variaveis_opcionais": [],
+  "tons_suportados": ["analitico", "impulsivo", "cauteloso"],
+  "aprovado_por": "roque@bssp.com.br",
+  "aprovado_em": "2026-04-29T09:00:00-03:00",
+  "observacoes": "v1 baseline — revisar com Diretoria de Marketing antes do ramp-up em produção"
+}

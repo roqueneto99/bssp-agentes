@@ -1,0 +1,14 @@
+{
+  "id": "tpl_v1_ancoragem",
+  "version": "v1",
+  "nudge": "ancoragem",
+  "canal": "email",
+  "assunto": "{curso} — quanto retorna em 12 meses?",
+  "corpo": "Olá {nome_curto},\n\nO investimento mensal de {valor_mensal} costuma retornar em média 3x no primeiro ano pós-conclusão, segundo levantamento com nossos ex-alunos.\n\nQuer que eu te mostre os números detalhados do {curso}?\n\nEquipe BSSP",
+  "variaveis_obrigatorias": ["nome_curto", "curso", "valor_mensal"],
+  "variaveis_opcionais": [],
+  "tons_suportados": ["analitico", "impulsivo", "cauteloso"],
+  "aprovado_por": "roque@bssp.com.br",
+  "aprovado_em": "2026-04-29T09:00:00-03:00",
+  "observacoes": "v1 baseline — revisar com Diretoria de Marketing antes do ramp-up em produção"
+}

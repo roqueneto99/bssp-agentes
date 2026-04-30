@@ -1,0 +1,14 @@
+{
+  "id": "tpl_v1_boas_vindas",
+  "version": "v1",
+  "nudge": "boas_vindas",
+  "canal": "email",
+  "assunto": "Bem-vindo, {nome_curto}!",
+  "corpo": "Olá {nome_curto},\n\nRecebemos seu interesse em {curso}. Nos próximos dias vou te enviar conteúdo que costuma ajudar quem está no seu momento de decisão. Qualquer dúvida, é só responder.\n\nEquipe BSSP",
+  "variaveis_obrigatorias": ["nome_curto", "curso"],
+  "variaveis_opcionais": [],
+  "tons_suportados": ["analitico", "impulsivo", "cauteloso"],
+  "aprovado_por": "roque@bssp.com.br",
+  "aprovado_em": "2026-04-29T09:00:00-03:00",
+  "observacoes": "v1 baseline — revisar com Diretoria de Marketing antes do ramp-up em produção"
+}
