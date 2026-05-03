@@ -23,6 +23,7 @@ from pathlib import Path
 # Garantir imports do projeto
 sys.path.insert(0, str(Path(__file__).parent))
 from dotenv import load_dotenv
+from scripts.squad2_batch_scoring import run_batch_scoring
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -54,6 +55,18 @@ async def run():
         return 0 if status == "completed" else 1
     finally:
         await close_db()
+    # === Squad 2 — scoring automático em batch (auto-deploy 2026-05) ===
+    if not getattr(args, 'skip_scoring', False):
+        try:
+            scoring_metrics = await run_batch_scoring(
+                pool=db_pool,
+                max_leads=int(os.environ.get('MAX_SCORING_PER_RUN', '500')),
+                dry_run=os.environ.get('SCORING_DRY_RUN','false').lower()=='true',
+            )
+            logger.info('Scoring metrics: %s', scoring_metrics)
+        except Exception:
+            logger.exception('falha no batch scoring (sync seguiu OK)')
+
 
 
 if __name__ == "__main__":
