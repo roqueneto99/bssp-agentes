@@ -41,6 +41,7 @@ from src.integrations.hablla.client import HabllaClient
 from src.integrations.sendgrid import SendGridClient, SendGridConfig
 from src.database.queries_squad3 import MensagensRepository, NullMensagensRepo
 from src.webhooks import sendgrid_receiver as sendgrid_webhook
+from src.api.routers import leads_pipeline
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 logger = logging.getLogger("painel")
@@ -143,6 +144,7 @@ async def _provisionar_custom_fields(rd: RDStationClient) -> None:
 
 # Mount webhook routers
 app.include_router(sendgrid_webhook.router)
+app.include_router(leads_pipeline.router)
 
 
 @app.on_event("startup")
