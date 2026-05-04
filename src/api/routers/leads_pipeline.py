@@ -1,7 +1,12 @@
 """
-Endpoints FastAPI pro Kanban — bssp-agentes/src/api/routers/leads_pipeline.py
+Endpoints FastAPI pro Kanban — v5
 
-v4 — adiciona GET /api/leads/{id} (detalhe completo pro sheet do dashboard)
+Adiciona filtros ao GET /api/leads/pipeline:
+- q (search nome/email)
+- origem, temperatura, prioridade (csv)
+- score_min, score_max
+- lgpd_only (apenas conformes)
+- com_cadencia (Squad 3 ativo)
 """
 from __future__ import annotations
 
@@ -65,7 +70,6 @@ class MoveClassificacaoBody(BaseModel):
 
 
 class LeadDetail(BaseModel):
-    """Detalhe completo do lead pra alimentar o sheet do dashboard."""
     id: str
     nome: str
     email: str
@@ -96,6 +100,7 @@ class LeadDetail(BaseModel):
     s2_rota: Optional[str] = None
     s2_acoes: Optional[list] = None
     s2_tags: Optional[list] = None
+    s2_dimensoes: Optional[dict] = None
     s2_processado_em: Optional[datetime] = None
     s3_estagio: Optional[str] = None
     s3_cadencia_atual: Optional[str] = None
@@ -124,7 +129,8 @@ CASE
 END
 """
 
-SQL_PIPELINE = f"""
+# Base de filtragem por período (sempre aplica). Outros filtros são append.
+SQL_PIPELINE_BASE = f"""
 WITH leads_filtrados AS (
     SELECT
         l.id,
@@ -146,11 +152,16 @@ WITH leads_filtrados AS (
         {CLASSIFICACAO_NORMALIZE_SQL} AS classificacao,
         COALESCE(l.ultima_interacao_em, l.last_conversion_date, l.rd_created_at, NOW()) AS ultima_interacao_em,
         COALESCE(l.lgpd_conforme, l.s1_compliance = 'conforme', false) AS lgpd_conforme,
+        l.s1_temperatura,
+        l.s1_prioridade,
+        l.s3_cadencia_atual,
         l.consultor,
         l.matricula_curso
     FROM leads l
-    WHERE COALESCE(l.ultima_interacao_em, l.last_conversion_date, l.rd_created_at) >= :desde
-       OR l.s2_processado_em >= :desde
+    WHERE
+        (COALESCE(l.ultima_interacao_em, l.last_conversion_date, l.rd_created_at) >= :desde
+         OR l.s2_processado_em >= :desde)
+        {{EXTRA_FILTERS}}
 )
 SELECT *,
        ROW_NUMBER() OVER (
@@ -181,7 +192,7 @@ SELECT
     COALESCE(l.origem_label, l.lifecycle_stage, 'orgânico') AS origem_label,
     COALESCE(l.lgpd_conforme, l.s1_compliance = 'conforme', false) AS lgpd_conforme,
     l.s1_temperatura, l.s1_prioridade, l.s1_area_principal, l.s1_compliance, l.s1_processado_em,
-    l.s2_briefing, l.s2_rota, l.s2_acoes, l.s2_tags, l.s2_processado_em,
+    l.s2_briefing, l.s2_rota, l.s2_acoes, l.s2_tags, l.s2_dimensoes, l.s2_processado_em,
     l.s3_estagio, l.s3_cadencia_atual, l.s3_canal_preferido,
     l.s3_msgs_enviadas, l.s3_ultima_msg_em, l.s3_ultima_resposta_em,
     l.rd_created_at, l.last_conversion_date, l.first_conversion_date,
@@ -193,18 +204,99 @@ WHERE l.id = :id
 """)
 
 
+def _csv_to_list(s: Optional[str]) -> Optional[list[str]]:
+    if not s:
+        return None
+    items = [x.strip().lower() for x in s.split(",") if x.strip()]
+    return items or None
+
+
+def _build_pipeline_filters(
+    q: Optional[str],
+    origem: Optional[list[str]],
+    temperatura: Optional[list[str]],
+    prioridade: Optional[list[str]],
+    score_min: Optional[int],
+    score_max: Optional[int],
+    lgpd_only: bool,
+    com_cadencia: Optional[bool],
+) -> tuple[str, dict]:
+    """Constrói cláusulas WHERE adicionais e dict de parâmetros, à prova de SQL injection
+    (tudo via named params do SQLAlchemy)."""
+    clauses: list[str] = []
+    params: dict = {}
+
+    if q:
+        clauses.append("(l.name ILIKE :q OR l.email ILIKE :q)")
+        params["q"] = f"%{q}%"
+
+    if origem:
+        # ANY com array literal
+        clauses.append("LOWER(COALESCE(l.origem, 'organico')) = ANY(:origem_list)")
+        params["origem_list"] = origem
+
+    if temperatura:
+        clauses.append("LOWER(l.s1_temperatura) = ANY(:temp_list)")
+        params["temp_list"] = temperatura
+
+    if prioridade:
+        clauses.append("LOWER(l.s1_prioridade) = ANY(:prio_list)")
+        params["prio_list"] = prioridade
+
+    if score_min is not None:
+        clauses.append("COALESCE(l.s2_score, 0) >= :score_min")
+        params["score_min"] = score_min
+
+    if score_max is not None:
+        clauses.append("COALESCE(l.s2_score, 0) <= :score_max")
+        params["score_max"] = score_max
+
+    if lgpd_only:
+        clauses.append("(COALESCE(l.lgpd_conforme, false) = true OR l.s1_compliance = 'conforme')")
+
+    if com_cadencia is True:
+        clauses.append("l.s3_cadencia_atual IS NOT NULL")
+    elif com_cadencia is False:
+        clauses.append("l.s3_cadencia_atual IS NULL")
+
+    if not clauses:
+        return "", params
+    return "AND " + " AND ".join(clauses), params
+
+
 # ---------- GET /api/leads/pipeline ----------
 
 @router.get("/pipeline", response_model=PipelineResponse)
 async def get_pipeline(
     periodo: Literal["7d", "30d", "90d", "365d"] = Query(default="30d"),
     limit_por_coluna: int = Query(default=50, ge=10, le=200),
+    q: Optional[str] = Query(default=None, description="busca por nome ou email"),
+    origem: Optional[str] = Query(default=None, description="csv: landing,indicacao,organico,antigo"),
+    temperatura: Optional[str] = Query(default=None, description="csv: quente,morno,frio"),
+    prioridade: Optional[str] = Query(default=None, description="csv: alta,media,baixa"),
+    score_min: Optional[int] = Query(default=None, ge=0, le=100),
+    score_max: Optional[int] = Query(default=None, ge=0, le=100),
+    lgpd_only: bool = Query(default=False),
+    com_cadencia: Optional[bool] = Query(default=None),
 ) -> PipelineResponse:
     dias = {"7d": 7, "30d": 30, "90d": 90, "365d": 365}[periodo]
     desde = datetime.now(TZ_BRT) - timedelta(days=dias)
 
+    extra, extra_params = _build_pipeline_filters(
+        q=q,
+        origem=_csv_to_list(origem),
+        temperatura=_csv_to_list(temperatura),
+        prioridade=_csv_to_list(prioridade),
+        score_min=score_min,
+        score_max=score_max,
+        lgpd_only=lgpd_only,
+        com_cadencia=com_cadencia,
+    )
+    sql = SQL_PIPELINE_BASE.replace("{EXTRA_FILTERS}", extra)
+    params = {"desde": desde, **extra_params}
+
     async with get_session() as session:
-        result = await session.execute(text(SQL_PIPELINE), {"desde": desde})
+        result = await session.execute(text(sql), params)
         rows = result.mappings().all()
 
     response = PipelineResponse()
@@ -234,11 +326,10 @@ async def get_pipeline(
     return response
 
 
-# ---------- GET /api/leads/{lead_id} (detalhe completo) ----------
+# ---------- GET /api/leads/{lead_id} ----------
 
 @router.get("/{lead_id}", response_model=LeadDetail)
 async def get_lead_detail(lead_id: int) -> LeadDetail:
-    """Detalhe completo do lead pra renderizar no sheet."""
     async with get_session() as session:
         result = await session.execute(SQL_DETAIL, {"id": lead_id})
         row = result.mappings().first()
@@ -273,15 +364,14 @@ async def move_lead_classificacao(
     agora = datetime.now(TZ_BRT)
 
     async with get_session() as session:
-        atual = await session.execute(
-            text("SELECT cf_classificacao FROM leads WHERE id = :id"),
-            {"id": lead_id},
-        )
-        row = atual.first()
-        if not row:
-            raise HTTPException(404, "lead não encontrado")
-
-        await session.execute(SQL_MOVE, {"para": body.para.value, "agora": agora, "lead_id": lead_id})
+        async with session.begin():
+            atual = await session.execute(
+                text("SELECT cf_classificacao FROM leads WHERE id = :id"),
+                {"id": lead_id},
+            )
+            if not atual.first():
+                raise HTTPException(404, "lead não encontrado")
+            await session.execute(SQL_MOVE, {"para": body.para.value, "agora": agora, "lead_id": lead_id})
 
     return await _carregar_lead_card(lead_id)
 
