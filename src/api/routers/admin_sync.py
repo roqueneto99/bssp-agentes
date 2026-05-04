@@ -122,6 +122,53 @@ async def debug_hablla_raw(
         await h.close()
 
 
+@router.get("/hablla/probe-boards")
+async def probe_boards_endpoints(
+    x_admin_token: Optional[str] = Header(default=None),
+):
+    """Tenta múltiplos endpoints de boards/lists e retorna qual funcionou."""
+    _check_token(x_admin_token)
+    from src.integrations.hablla.client import HabllaClient, HabllaError
+    token = os.getenv("HABLLA_API_TOKEN", "")
+    workspace = os.getenv("HABLLA_WORKSPACE_ID", "")
+    if not token or not workspace:
+        raise HTTPException(500, "env ausentes")
+
+    h = HabllaClient(api_token=token, workspace_id=workspace)
+    candidatos = [
+        ("v1", "boards"),
+        ("v2", "boards"),
+        ("v1", "deals"),
+        ("v2", "deals"),
+        ("v1", "pipelines"),
+        ("v2", "pipelines"),
+    ]
+    out = {}
+    try:
+        for version, resource in candidatos:
+            path = h._ws_path(version, resource)
+            try:
+                data = await h._request("GET", path, params={"page": 1, "limit": 5})
+                shape = "list" if isinstance(data, list) else type(data).__name__
+                if isinstance(data, dict):
+                    keys = list(data.keys())[:8]
+                    results = data.get("results", [])
+                    out[f"{version}/{resource}"] = {
+                        "ok": True, "keys": keys, "results_count": len(results),
+                        "first_result_keys": list(results[0].keys())[:15] if results else [],
+                        "first_result_name": results[0].get("name") if results else None,
+                    }
+                else:
+                    out[f"{version}/{resource}"] = {"ok": True, "shape": shape, "count": len(data) if isinstance(data, list) else None}
+            except HabllaError as e:
+                out[f"{version}/{resource}"] = {"ok": False, "status": e.status_code, "msg": (e.message or "")[:120]}
+            except Exception as e:
+                out[f"{version}/{resource}"] = {"ok": False, "exc": str(e)[:120]}
+    finally:
+        await h.close()
+    return out
+
+
 @router.get("/hablla/maps")
 async def debug_hablla_maps(
     x_admin_token: Optional[str] = Header(default=None),
