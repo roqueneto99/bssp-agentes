@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -64,6 +64,39 @@ DATA_MODE: str = "api"
 
 execucoes: list = []
 running_leads: set = set()
+
+_orquestrador_status: dict = {
+    "running": False,
+    "last_run_id": None,
+    "last_started_at": None,
+    "last_finished_at": None,
+    "last_summary": None,
+}
+
+async def _run_orquestrador_bg(run_id: str, max_leads: int) -> None:
+    from datetime import datetime as _dt, timezone as _tz
+    _orquestrador_status["running"] = True
+    _orquestrador_status["last_run_id"] = run_id
+    _orquestrador_status["last_started_at"] = _dt.now(_tz.utc).isoformat()
+    _orquestrador_status["last_summary"] = None
+    try:
+        summary = await run_orquestrador(
+            pipeline_obj=pipeline,
+            running_set=running_leads,
+            data_mode=DATA_MODE,
+            max_leads=max_leads,
+            motivo=f"manual_{run_id[:8]}",
+        )
+        _orquestrador_status["last_summary"] = summary
+    except Exception as e:
+        logger.error("orquestrador bg run %s falhou: %s", run_id, e)
+        _orquestrador_status["last_summary"] = {"error": str(e)[:300]}
+    finally:
+        _orquestrador_status["running"] = False
+        _orquestrador_status["last_finished_at"] = _dt.now(_tz.utc).isoformat()
+
+
+
 
 # --- Cache de segmentacoes (para filtro por data — modo API) ---
 # Chave: "segid" → {"contacts": [...], "ts": float, "pages": int}
@@ -1191,16 +1224,25 @@ async def _auto_sync_loop():
             raise
 
 
+import uuid as _uuid
+
 @app.post("/api/orquestrador/run")
-async def trigger_orquestrador(max_leads: int = Query(default=30, ge=1, le=200)):
-    """Dispara o agente orquestrador: re-scora leads novos + alterados + expirados."""
-    return await run_orquestrador(
-        pipeline_obj=pipeline,
-        running_set=running_leads,
-        data_mode=DATA_MODE,
-        max_leads=max_leads,
-        motivo="manual",
-    )
+async def trigger_orquestrador(
+    background_tasks: BackgroundTasks,
+    max_leads: int = Query(default=30, ge=1, le=200),
+):
+    """Dispara em background. Retorna 202 imediato."""
+    if _orquestrador_status["running"]:
+        return {"started": False, "reason": "already_running", "current_run": _orquestrador_status["last_run_id"]}
+    run_id = str(_uuid.uuid4())
+    background_tasks.add_task(_run_orquestrador_bg, run_id, max_leads)
+    return {"started": True, "run_id": run_id, "max_leads": max_leads, "status_url": "/api/orquestrador/status", "estimated_seconds": max_leads * 30}
+
+
+@app.get("/api/orquestrador/status")
+async def status_orquestrador():
+    """Status da última execução."""
+    return _orquestrador_status
 
 
 @app.post("/api/db/sync")
