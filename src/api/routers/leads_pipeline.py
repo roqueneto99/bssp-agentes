@@ -1,20 +1,7 @@
 """
 Endpoints FastAPI pro Kanban — bssp-agentes/src/api/routers/leads_pipeline.py
 
-v3 — usa SQLAlchemy async (padrão do projeto, não asyncpg direto)
-
-Schema real da tabela `leads`:
-- id INTEGER (não UUID)
-- name (não nome)
-- rd_created_at (não criado_em)
-- last_conversion_date (não ultima_conversao_em)
-- s2_score (DOUBLE PRECISION) — score do Squad 2
-- s2_classificacao — classificação do Squad 2 (fonte preferida)
-- cf_classificacao — coluna custom (backfill em 03/05/2026)
-
-Endpoints:
-  GET   /api/leads/pipeline?periodo=30d       — agrupa por classificação
-  PATCH /api/leads/{lead_id}/classificacao    — move lead entre colunas
+v4 — adiciona GET /api/leads/{id} (detalhe completo pro sheet do dashboard)
 """
 from __future__ import annotations
 
@@ -31,8 +18,6 @@ from src.database.connection import get_session
 router = APIRouter(prefix="/api/leads", tags=["leads-pipeline"])
 TZ_BRT = timezone(timedelta(hours=-3))
 
-
-# ---------- Enums e Schemas ----------
 
 class Classificacao(str, Enum):
     COLD = "COLD"
@@ -77,6 +62,55 @@ class PipelineResponse(BaseModel):
 class MoveClassificacaoBody(BaseModel):
     para: Classificacao
     motivo: Optional[str] = Field(default="manual_drag", max_length=255)
+
+
+class LeadDetail(BaseModel):
+    """Detalhe completo do lead pra alimentar o sheet do dashboard."""
+    id: str
+    nome: str
+    email: str
+    iniciais: str
+    personal_phone: Optional[str] = None
+    mobile_phone: Optional[str] = None
+    job_title: Optional[str] = None
+    company_name: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    linkedin: Optional[str] = None
+    website: Optional[str] = None
+    classificacao: Classificacao
+    classificacao_origem: Optional[str] = None
+    score: int
+    fit_score: Optional[str] = None
+    interest_score: Optional[str] = None
+    origem: str
+    origem_label: str
+    lgpd_conforme: bool
+    s1_temperatura: Optional[str] = None
+    s1_prioridade: Optional[str] = None
+    s1_area_principal: Optional[str] = None
+    s1_compliance: Optional[str] = None
+    s1_processado_em: Optional[datetime] = None
+    s2_briefing: Optional[str] = None
+    s2_rota: Optional[str] = None
+    s2_acoes: Optional[list] = None
+    s2_tags: Optional[list] = None
+    s2_processado_em: Optional[datetime] = None
+    s3_estagio: Optional[str] = None
+    s3_cadencia_atual: Optional[str] = None
+    s3_canal_preferido: Optional[str] = None
+    s3_msgs_enviadas: Optional[int] = None
+    s3_ultima_msg_em: Optional[datetime] = None
+    s3_ultima_resposta_em: Optional[datetime] = None
+    rd_created_at: Optional[datetime] = None
+    last_conversion_date: Optional[datetime] = None
+    first_conversion_date: Optional[datetime] = None
+    lifecycle_stage: Optional[str] = None
+    tags: Optional[list] = None
+    consultor: Optional[str] = None
+    matricula_curso: Optional[str] = None
+    ultima_interacao_em: datetime
 
 
 # ---------- SQL ----------
@@ -126,6 +160,38 @@ SELECT *,
 FROM leads_filtrados
 """
 
+SQL_DETAIL = text(f"""
+SELECT
+    l.id,
+    COALESCE(l.name, '(sem nome)') AS nome,
+    l.email,
+    UPPER(
+        LEFT(SPLIT_PART(COALESCE(l.name, ''), ' ', 1), 1) ||
+        COALESCE(LEFT(SPLIT_PART(COALESCE(l.name, ''), ' ', 2), 1), '')
+    ) AS iniciais,
+    l.personal_phone, l.mobile_phone,
+    l.job_title, l.company_name,
+    l.city, l.state, l.country,
+    l.linkedin, l.website,
+    {CLASSIFICACAO_NORMALIZE_SQL} AS classificacao,
+    l.classificacao_origem,
+    GREATEST(0, LEAST(100, COALESCE(l.s2_score, 0)::int)) AS score,
+    l.fit_score, l.interest_score,
+    COALESCE(l.origem, 'organico') AS origem,
+    COALESCE(l.origem_label, l.lifecycle_stage, 'orgânico') AS origem_label,
+    COALESCE(l.lgpd_conforme, l.s1_compliance = 'conforme', false) AS lgpd_conforme,
+    l.s1_temperatura, l.s1_prioridade, l.s1_area_principal, l.s1_compliance, l.s1_processado_em,
+    l.s2_briefing, l.s2_rota, l.s2_acoes, l.s2_tags, l.s2_processado_em,
+    l.s3_estagio, l.s3_cadencia_atual, l.s3_canal_preferido,
+    l.s3_msgs_enviadas, l.s3_ultima_msg_em, l.s3_ultima_resposta_em,
+    l.rd_created_at, l.last_conversion_date, l.first_conversion_date,
+    l.lifecycle_stage, l.tags,
+    l.consultor, l.matricula_curso,
+    COALESCE(l.ultima_interacao_em, l.last_conversion_date, l.rd_created_at, NOW()) AS ultima_interacao_em
+FROM leads l
+WHERE l.id = :id
+""")
+
 
 # ---------- GET /api/leads/pipeline ----------
 
@@ -166,6 +232,24 @@ async def get_pipeline(
             continue
 
     return response
+
+
+# ---------- GET /api/leads/{lead_id} (detalhe completo) ----------
+
+@router.get("/{lead_id}", response_model=LeadDetail)
+async def get_lead_detail(lead_id: int) -> LeadDetail:
+    """Detalhe completo do lead pra renderizar no sheet."""
+    async with get_session() as session:
+        result = await session.execute(SQL_DETAIL, {"id": lead_id})
+        row = result.mappings().first()
+        if not row:
+            raise HTTPException(404, "lead não encontrado")
+
+    d = dict(row)
+    d["id"] = str(d["id"])
+    d["score"] = int(d["score"])
+    d["lgpd_conforme"] = bool(d["lgpd_conforme"])
+    return LeadDetail(**d)
 
 
 # ---------- PATCH /api/leads/{lead_id}/classificacao ----------
