@@ -193,8 +193,10 @@ async def _provisionar_custom_fields(rd: RDStationClient) -> None:
 
 # Mount webhook routers
 app.include_router(sendgrid_webhook.router)
-app.include_router(leads_pipeline.router)
+# IMPORTANTE: leads_summary ANTES de leads_pipeline. O pipeline tem
+# @router.get("/{lead_id}") que captura /summary se vier depois.
 app.include_router(leads_summary.router)
+app.include_router(leads_pipeline.router)
 app.include_router(admin_sync.router)
 
 
