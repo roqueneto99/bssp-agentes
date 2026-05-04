@@ -374,13 +374,33 @@ async def _ensure_columns() -> None:
 # Sync de um lead
 # ----------------------------------------------------------------------
 
+async def _load_manual_maps() -> dict[str, dict[str, str]]:
+    """Lê hablla_id_map (cadastro manual feito pelo admin) e separa por type.
+    Tabela existe a partir da migration 006."""
+    out = {"board": {}, "list": {}, "user": {}, "sector": {}}
+    try:
+        async with get_session() as session:
+            result = await session.execute(text(
+                "SELECT hablla_id, type, name FROM hablla_id_map"
+            ))
+            for row in result.mappings().all():
+                t = row["type"]
+                if t in out:
+                    out[t][row["hablla_id"]] = row["name"]
+    except Exception as e:
+        # se a migration 006 ainda não rodou, segue sem manual map
+        logger.info("hablla_id_map indisponível: %s", e)
+    return out
+
+
 async def _build_resolution_maps(hablla: HabllaClient) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
-    """Carrega users, boards e lists do Hablla e devolve 3 dicts id→name.
-    Falhas individuais não derrubam o sync — só voltam dict vazio."""
+    """Carrega users do Hablla + boards/lists da tabela manual hablla_id_map.
+    Devolve 3 dicts id→name. Falhas individuais não derrubam o sync."""
     users_map: dict[str, str] = {}
     boards_map: dict[str, str] = {}
     lists_map: dict[str, str] = {}
 
+    # 1) Users — direto do Hablla (já paginado)
     try:
         users = await hablla.list_users()
         for member in users or []:
@@ -390,7 +410,6 @@ async def _build_resolution_maps(hablla: HabllaClient) -> tuple[dict[str, str], 
                 name = inner.get("name") or inner.get("full_name") or inner.get("email")
                 if uid and name:
                     users_map[uid] = str(name).strip()
-            # também aceita user no nível raiz
             uid_raw = str(member.get("id") or "") if isinstance(member, dict) else ""
             name_raw = (member.get("name") if isinstance(member, dict) else None)
             if uid_raw and name_raw and uid_raw not in users_map:
@@ -398,29 +417,41 @@ async def _build_resolution_maps(hablla: HabllaClient) -> tuple[dict[str, str], 
     except Exception as e:
         logger.warning("Falha ao carregar users do Hablla: %s", e)
 
+    # 2) Boards e lists — tenta Hablla primeiro (provavelmente vai dar 401),
+    #    mas começa com tabela manual.
+    manual = await _load_manual_maps()
+    boards_map.update(manual.get("board", {}))
+    lists_map.update(manual.get("list", {}))
+    # users também pode receber overrides manuais (ex: caso o user_id do
+    # card não esteja no list_users)
+    for k, v in (manual.get("user") or {}).items():
+        users_map[k] = v
+
     try:
         boards = await hablla.list_boards(limit=200)
         for b in boards or []:
             bid = str(b.get("id") or b.get("_id") or "")
             name = b.get("name") or b.get("title")
-            if bid and name:
+            if bid and name and bid not in boards_map:
                 boards_map[bid] = str(name).strip()
     except Exception as e:
-        logger.warning("Falha ao carregar boards do Hablla: %s", e)
+        logger.info("list_boards Hablla falhou (ok, usando manual): %s", e)
 
     try:
         lists = await hablla.list_lists(limit=500)
         for l in lists or []:
             lid = str(l.get("id") or l.get("_id") or "")
             name = l.get("name") or l.get("title")
-            if lid and name:
+            if lid and name and lid not in lists_map:
                 lists_map[lid] = str(name).strip()
     except Exception as e:
-        logger.warning("Falha ao carregar lists do Hablla: %s", e)
+        logger.info("list_lists Hablla falhou (ok, usando manual): %s", e)
 
     logger.info(
-        "Maps carregados: users=%d boards=%d lists=%d",
+        "Maps carregados: users=%d boards=%d lists=%d (manual: b=%d l=%d u=%d)",
         len(users_map), len(boards_map), len(lists_map),
+        len(manual.get("board", {})), len(manual.get("list", {})),
+        len(manual.get("user", {})),
     )
     return users_map, boards_map, lists_map
 

@@ -12,8 +12,11 @@ import os
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Body, Header, HTTPException, Query
+from pydantic import BaseModel, Field
+from sqlalchemy import text
 
+from src.database.connection import get_session
 from src.sync.hablla_lead_sync import (
     DEFAULT_RESYNC_AFTER_HOURS,
     run_for_email,
@@ -120,6 +123,80 @@ async def debug_hablla_raw(
         }
     finally:
         await h.close()
+
+
+class HabllaMapEntry(BaseModel):
+    hablla_id: str = Field(..., min_length=1, max_length=64)
+    type: str = Field(..., regex=r"^(board|list|user|sector)$")
+    name: str = Field(..., min_length=1, max_length=255)
+    notes: Optional[str] = None
+
+
+@router.get("/hablla/map")
+async def list_hablla_map(
+    type: Optional[str] = Query(default=None),
+    x_admin_token: Optional[str] = Header(default=None),
+):
+    _check_token(x_admin_token)
+    sql = "SELECT hablla_id, type, name, notes, updated_at FROM hablla_id_map"
+    params: dict = {}
+    if type:
+        sql += " WHERE type = :t"
+        params["t"] = type
+    sql += " ORDER BY type, name"
+    async with get_session() as session:
+        result = await session.execute(text(sql), params)
+        rows = [dict(r) for r in result.mappings().all()]
+    return _serialize(rows)
+
+
+@router.post("/hablla/map")
+async def upsert_hablla_map(
+    body: HabllaMapEntry = Body(...),
+    x_admin_token: Optional[str] = Header(default=None),
+):
+    """Cria ou atualiza um mapeamento hablla_id → name."""
+    _check_token(x_admin_token)
+    sql = text("""
+    INSERT INTO hablla_id_map (hablla_id, type, name, notes, updated_at)
+    VALUES (:hid, :type, :name, :notes, NOW())
+    ON CONFLICT (hablla_id, type)
+    DO UPDATE SET name = EXCLUDED.name, notes = EXCLUDED.notes, updated_at = NOW()
+    RETURNING id
+    """)
+    async with get_session() as session:
+        async with session.begin():
+            result = await session.execute(sql, {
+                "hid": body.hablla_id, "type": body.type,
+                "name": body.name, "notes": body.notes,
+            })
+            row = result.mappings().first()
+    return {"ok": True, "id": row["id"] if row else None,
+            "hablla_id": body.hablla_id, "type": body.type, "name": body.name}
+
+
+@router.post("/hablla/map/bulk")
+async def bulk_hablla_map(
+    body: list[HabllaMapEntry] = Body(...),
+    x_admin_token: Optional[str] = Header(default=None),
+):
+    _check_token(x_admin_token)
+    sql = text("""
+    INSERT INTO hablla_id_map (hablla_id, type, name, notes, updated_at)
+    VALUES (:hid, :type, :name, :notes, NOW())
+    ON CONFLICT (hablla_id, type)
+    DO UPDATE SET name = EXCLUDED.name, notes = EXCLUDED.notes, updated_at = NOW()
+    """)
+    inserted = 0
+    async with get_session() as session:
+        async with session.begin():
+            for entry in body:
+                await session.execute(sql, {
+                    "hid": entry.hablla_id, "type": entry.type,
+                    "name": entry.name, "notes": entry.notes,
+                })
+                inserted += 1
+    return {"ok": True, "upserts": inserted}
 
 
 @router.get("/hablla/check-user/{user_id}")
