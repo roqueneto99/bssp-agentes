@@ -122,6 +122,51 @@ async def debug_hablla_raw(
         await h.close()
 
 
+@router.get("/hablla/check-user/{user_id}")
+async def check_user_in_map(
+    user_id: str,
+    x_admin_token: Optional[str] = Header(default=None),
+):
+    """Confirma se um user_id (vindo de card.user_id) bate com alguma chave
+    do users_map. Retorna nome se sim; lista chaves próximas se não."""
+    _check_token(x_admin_token)
+    from src.integrations.hablla.client import HabllaClient
+    from src.sync.hablla_lead_sync import _build_resolution_maps
+    token = os.getenv("HABLLA_API_TOKEN", "")
+    workspace = os.getenv("HABLLA_WORKSPACE_ID", "")
+    h = HabllaClient(api_token=token, workspace_id=workspace)
+    try:
+        users_raw = await h.list_users()
+        users_map, _, _ = await _build_resolution_maps(h)
+        # vasculha em todos os shapes possíveis dos members
+        found_in: list[str] = []
+        for member in users_raw or []:
+            if not isinstance(member, dict):
+                continue
+            inner = member.get("user") if isinstance(member.get("user"), dict) else {}
+            if member.get("id") == user_id:
+                found_in.append("member.id")
+            if inner.get("id") == user_id:
+                found_in.append("member.user.id")
+            if inner.get("_id") == user_id:
+                found_in.append("member.user._id")
+            if member.get("user_id") == user_id:
+                found_in.append("member.user_id")
+            if inner.get("firebase_id") == user_id:
+                found_in.append("member.user.firebase_id")
+        return {
+            "user_id_searched": user_id,
+            "found_in_map": user_id in users_map,
+            "name_if_found": users_map.get(user_id),
+            "matched_in_member_paths": found_in,
+            "users_count": len(users_raw),
+            "users_map_size": len(users_map),
+            "first_5_keys_in_map": list(users_map.keys())[:5],
+        }
+    finally:
+        await h.close()
+
+
 @router.get("/hablla/probe-single/{email}")
 async def probe_single_resources(
     email: str,
