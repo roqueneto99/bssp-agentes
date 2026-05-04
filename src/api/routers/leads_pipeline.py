@@ -53,6 +53,13 @@ class LeadCard(BaseModel):
     cadencia: Optional[CadenciaInline] = None
     consultor: Optional[str] = None
     matricula_curso: Optional[str] = None
+    # Campos vindos do sync Hablla → leads (src/sync/hablla_lead_sync.py).
+    # Ficam None se o lead ainda não tem registro na Hablla.
+    s3_estagio: Optional[str] = None                # nome da etapa do card no Hablla
+    s3_canal_preferido: Optional[str] = None        # whatsapp | email | telegram | ...
+    s3_ultima_msg_em: Optional[datetime] = None     # max(updated_at) dos services
+    em_atendimento: bool = False                    # card Hablla aberto OU service ativo
+    whatsapp_ativo: bool = False                    # canal=whatsapp E última msg < 24h
 
 
 class PipelineResponse(BaseModel):
@@ -156,7 +163,19 @@ WITH leads_filtrados AS (
         l.s1_prioridade,
         l.s3_cadencia_atual,
         l.consultor,
-        l.matricula_curso
+        l.matricula_curso,
+        l.s3_estagio,
+        l.s3_canal_preferido,
+        l.s3_ultima_msg_em,
+        -- em_atendimento: card Hablla aberto OU service ativo (preenchido pelo sync)
+        COALESCE(l.hablla_em_atendimento, false) AS em_atendimento,
+        -- whatsapp_ativo: canal=whatsapp E última msg < 24h. Não inventa nada —
+        -- só vira true quando o sync Hablla→Postgres alimentou os 2 campos.
+        (
+            LOWER(COALESCE(l.s3_canal_preferido, '')) = 'whatsapp'
+            AND l.s3_ultima_msg_em IS NOT NULL
+            AND l.s3_ultima_msg_em >= NOW() - INTERVAL '24 hours'
+        ) AS whatsapp_ativo
     FROM leads l
     WHERE
         (COALESCE(l.ultima_interacao_em, l.last_conversion_date, l.rd_created_at) >= :desde
@@ -318,6 +337,11 @@ async def get_pipeline(
                 cadencia=None,
                 consultor=row["consultor"],
                 matricula_curso=row["matricula_curso"],
+                s3_estagio=row["s3_estagio"],
+                s3_canal_preferido=row["s3_canal_preferido"],
+                s3_ultima_msg_em=row["s3_ultima_msg_em"],
+                em_atendimento=bool(row["em_atendimento"]),
+                whatsapp_ativo=bool(row["whatsapp_ativo"]),
             )
             getattr(response, row["classificacao"]).append(card)
         except Exception:
@@ -392,7 +416,14 @@ async def _carregar_lead_card(lead_id: int) -> LeadCard:
         {CLASSIFICACAO_NORMALIZE_SQL} AS classificacao,
         COALESCE(l.ultima_interacao_em, l.last_conversion_date, l.rd_created_at, NOW()) AS ultima_interacao_em,
         COALESCE(l.lgpd_conforme, false) AS lgpd_conforme,
-        l.consultor, l.matricula_curso
+        l.consultor, l.matricula_curso,
+        l.s3_estagio, l.s3_canal_preferido, l.s3_ultima_msg_em,
+        COALESCE(l.hablla_em_atendimento, false) AS em_atendimento,
+        (
+            LOWER(COALESCE(l.s3_canal_preferido, '')) = 'whatsapp'
+            AND l.s3_ultima_msg_em IS NOT NULL
+            AND l.s3_ultima_msg_em >= NOW() - INTERVAL '24 hours'
+        ) AS whatsapp_ativo
     FROM leads l
     WHERE l.id = :id
     """)
@@ -415,4 +446,9 @@ async def _carregar_lead_card(lead_id: int) -> LeadCard:
             cadencia=None,
             consultor=row["consultor"],
             matricula_curso=row["matricula_curso"],
+            s3_estagio=row["s3_estagio"],
+            s3_canal_preferido=row["s3_canal_preferido"],
+            s3_ultima_msg_em=row["s3_ultima_msg_em"],
+            em_atendimento=bool(row["em_atendimento"]),
+            whatsapp_ativo=bool(row["whatsapp_ativo"]),
         )
