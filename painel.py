@@ -41,6 +41,7 @@ from src.integrations.hablla.client import HabllaClient
 from src.integrations.sendgrid import SendGridClient, SendGridConfig
 from src.database.queries_squad3 import MensagensRepository, NullMensagensRepo
 from src.webhooks import sendgrid_receiver as sendgrid_webhook
+from src.orquestrador import run as run_orquestrador
 from src.api.routers import leads_pipeline
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
@@ -1188,6 +1189,18 @@ async def _auto_sync_loop():
         except asyncio.CancelledError:
             logger.info("Auto-sync loop cancelado")
             raise
+
+
+@app.post("/api/orquestrador/run")
+async def trigger_orquestrador(max_leads: int = Query(default=30, ge=1, le=200)):
+    """Dispara o agente orquestrador: re-scora leads novos + alterados + expirados."""
+    return await run_orquestrador(
+        pipeline_obj=pipeline,
+        running_set=running_leads,
+        data_mode=DATA_MODE,
+        max_leads=max_leads,
+        motivo="manual",
+    )
 
 
 @app.post("/api/db/sync")
