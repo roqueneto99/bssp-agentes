@@ -127,7 +127,7 @@ async def debug_hablla_raw(
 
 class HabllaMapEntry(BaseModel):
     hablla_id: str = Field(..., min_length=1, max_length=64)
-    type: str = Field(..., regex=r"^(board|list|user|sector)$")
+    type: str = Field(..., pattern=r"^(board|list|user|sector)$")
     name: str = Field(..., min_length=1, max_length=255)
     notes: Optional[str] = None
 
