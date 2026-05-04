@@ -175,6 +175,88 @@ async def upsert_hablla_map(
             "hablla_id": body.hablla_id, "type": body.type, "name": body.name}
 
 
+class CursoEntry(BaseModel):
+    hablla_board_id: str = Field(..., min_length=1, max_length=64)
+    nome: str = Field(..., min_length=1, max_length=255)
+    valor_matricula_brl: Optional[float] = None
+    mensalidades: Optional[int] = None
+    codigo: Optional[str] = None
+    ativo: bool = True
+
+
+@router.get("/cursos")
+async def list_cursos(x_admin_token: Optional[str] = Header(default=None)):
+    _check_token(x_admin_token)
+    async with get_session() as session:
+        result = await session.execute(text(
+            "SELECT hablla_board_id, codigo, nome, valor_matricula_brl::float, "
+            "mensalidades, ativo, updated_at FROM cursos ORDER BY ativo DESC, nome"
+        ))
+        return _serialize([dict(r) for r in result.mappings().all()])
+
+
+@router.post("/cursos")
+async def upsert_curso(
+    body: CursoEntry = Body(...),
+    x_admin_token: Optional[str] = Header(default=None),
+):
+    _check_token(x_admin_token)
+    sql = text("""
+    INSERT INTO cursos (hablla_board_id, codigo, nome, valor_matricula_brl,
+                        mensalidades, ativo, updated_at)
+    VALUES (:hbid, :cod, :nome, :valor, :mens, :ativo, NOW())
+    ON CONFLICT (hablla_board_id) DO UPDATE SET
+        codigo = EXCLUDED.codigo,
+        nome = EXCLUDED.nome,
+        valor_matricula_brl = EXCLUDED.valor_matricula_brl,
+        mensalidades = EXCLUDED.mensalidades,
+        ativo = EXCLUDED.ativo,
+        updated_at = NOW()
+    RETURNING id
+    """)
+    async with get_session() as session:
+        async with session.begin():
+            result = await session.execute(sql, {
+                "hbid": body.hablla_board_id, "cod": body.codigo,
+                "nome": body.nome, "valor": body.valor_matricula_brl,
+                "mens": body.mensalidades, "ativo": body.ativo,
+            })
+            row = result.mappings().first()
+    return {"ok": True, "id": row["id"] if row else None,
+            "hablla_board_id": body.hablla_board_id, "nome": body.nome}
+
+
+@router.post("/cursos/bulk")
+async def bulk_cursos(
+    body: list[CursoEntry] = Body(...),
+    x_admin_token: Optional[str] = Header(default=None),
+):
+    _check_token(x_admin_token)
+    sql = text("""
+    INSERT INTO cursos (hablla_board_id, codigo, nome, valor_matricula_brl,
+                        mensalidades, ativo, updated_at)
+    VALUES (:hbid, :cod, :nome, :valor, :mens, :ativo, NOW())
+    ON CONFLICT (hablla_board_id) DO UPDATE SET
+        codigo = EXCLUDED.codigo,
+        nome = EXCLUDED.nome,
+        valor_matricula_brl = EXCLUDED.valor_matricula_brl,
+        mensalidades = EXCLUDED.mensalidades,
+        ativo = EXCLUDED.ativo,
+        updated_at = NOW()
+    """)
+    n = 0
+    async with get_session() as session:
+        async with session.begin():
+            for entry in body:
+                await session.execute(sql, {
+                    "hbid": entry.hablla_board_id, "cod": entry.codigo,
+                    "nome": entry.nome, "valor": entry.valor_matricula_brl,
+                    "mens": entry.mensalidades, "ativo": entry.ativo,
+                })
+                n += 1
+    return {"ok": True, "upserts": n}
+
+
 @router.post("/hablla/map/bulk")
 async def bulk_hablla_map(
     body: list[HabllaMapEntry] = Body(...),

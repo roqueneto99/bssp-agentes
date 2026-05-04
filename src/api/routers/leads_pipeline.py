@@ -52,14 +52,17 @@ class LeadCard(BaseModel):
     lgpd_conforme: bool
     cadencia: Optional[CadenciaInline] = None
     consultor: Optional[str] = None
-    matricula_curso: Optional[str] = None
+    matricula_curso: Optional[str] = None           # nome humano do curso (via cursos.nome)
+    valor_matricula: Optional[float] = None         # cursos.valor_matricula_brl
     # Campos vindos do sync Hablla → leads (src/sync/hablla_lead_sync.py).
     # Ficam None se o lead ainda não tem registro na Hablla.
-    s3_estagio: Optional[str] = None                # nome da etapa do card no Hablla
+    s3_estagio: Optional[str] = None                # nome humano da etapa do card no Hablla
     s3_canal_preferido: Optional[str] = None        # whatsapp | email | telegram | ...
     s3_ultima_msg_em: Optional[datetime] = None     # max(updated_at) dos services
     em_atendimento: bool = False                    # card Hablla aberto OU service ativo
     whatsapp_ativo: bool = False                    # canal=whatsapp E última msg < 24h
+    # Derivado pra UI nova
+    prioridade_visual: Optional[Literal["quente", "alta", "fria"]] = None
 
 
 class PipelineResponse(BaseModel):
@@ -163,8 +166,13 @@ WITH leads_filtrados AS (
         l.s1_prioridade,
         l.s3_cadencia_atual,
         l.consultor,
-        l.matricula_curso,
-        l.s3_estagio,
+        -- matricula_curso: prioriza JOIN com cursos (nome humano), fallback pro
+        -- valor já persistido (que pode ser nome ou ID dependendo do sync)
+        COALESCE(c.nome, l.matricula_curso) AS matricula_curso,
+        c.valor_matricula_brl::float AS valor_matricula,
+        -- s3_estagio: prioriza nome humano via hablla_id_map (type='list'),
+        -- fallback pro valor cru
+        COALESCE(him.name, l.s3_estagio) AS s3_estagio,
         l.s3_canal_preferido,
         l.s3_ultima_msg_em,
         -- em_atendimento: card Hablla aberto OU service ativo (preenchido pelo sync)
@@ -175,8 +183,21 @@ WITH leads_filtrados AS (
             LOWER(COALESCE(l.s3_canal_preferido, '')) = 'whatsapp'
             AND l.s3_ultima_msg_em IS NOT NULL
             AND l.s3_ultima_msg_em >= NOW() - INTERVAL '24 hours'
-        ) AS whatsapp_ativo
+        ) AS whatsapp_ativo,
+        -- prioridade_visual: derivada (vermelho/laranja/azul-claro)
+        CASE
+            WHEN COALESCE(l.s2_score, 0) >= 75 AND COALESCE(l.hablla_em_atendimento, false) THEN 'quente'
+            WHEN COALESCE(l.s1_prioridade, '') = 'alta'
+              OR COALESCE(l.s2_score, 0) >= 70 THEN 'alta'
+            ELSE 'fria'
+        END AS prioridade_visual
     FROM leads l
+    LEFT JOIN cursos c
+        ON c.hablla_board_id = l.hablla_board_id
+       AND c.ativo = true
+    LEFT JOIN hablla_id_map him
+        ON him.hablla_id = l.hablla_list_id
+       AND him.type = 'list'
     WHERE
         (COALESCE(l.ultima_interacao_em, l.last_conversion_date, l.rd_created_at) >= :desde
          OR l.s2_processado_em >= :desde)
@@ -337,11 +358,13 @@ async def get_pipeline(
                 cadencia=None,
                 consultor=row["consultor"],
                 matricula_curso=row["matricula_curso"],
+                valor_matricula=row.get("valor_matricula"),
                 s3_estagio=row["s3_estagio"],
                 s3_canal_preferido=row["s3_canal_preferido"],
                 s3_ultima_msg_em=row["s3_ultima_msg_em"],
                 em_atendimento=bool(row["em_atendimento"]),
                 whatsapp_ativo=bool(row["whatsapp_ativo"]),
+                prioridade_visual=row.get("prioridade_visual"),
             )
             getattr(response, row["classificacao"]).append(card)
         except Exception:

@@ -261,6 +261,8 @@ def _build_update_payload(
         "hablla_person_id": str(person.get("id") or person.get("_id") or "")[:64] or None,
         "consultor": None,
         "matricula_curso": None,
+        "hablla_board_id": None,
+        "hablla_list_id": None,
         "hablla_card_status": None,
         "hablla_em_atendimento": False,
         "s3_estagio": None,
@@ -279,6 +281,15 @@ def _build_update_payload(
                 latest_card.get("status", "")
             )
             payload["s3_estagio"] = _extract_estagio(latest_card, lists_map)
+            # Persiste IDs crus pra permitir JOIN com cursos / hablla_id_map
+            bid = latest_card.get("board_id") or latest_card.get("board")
+            lid = latest_card.get("list_id") or latest_card.get("list")
+            if isinstance(bid, dict):
+                bid = bid.get("id") or bid.get("_id")
+            if isinstance(lid, dict):
+                lid = lid.get("id") or lid.get("_id")
+            payload["hablla_board_id"] = str(bid)[:64] if bid else None
+            payload["hablla_list_id"] = str(lid)[:64] if lid else None
 
         # Há card aberto?
         for c in cards:
@@ -352,6 +363,8 @@ UPDATE leads SET
     hablla_person_id      = :hablla_person_id,
     consultor             = :consultor,
     matricula_curso       = :matricula_curso,
+    hablla_board_id       = :hablla_board_id,
+    hablla_list_id        = :hablla_list_id,
     hablla_card_status    = :hablla_card_status,
     hablla_em_atendimento = :hablla_em_atendimento,
     s3_estagio            = :s3_estagio,
@@ -490,6 +503,8 @@ async def sync_one_lead(
                             "hablla_person_id": None,
                             "consultor": None,
                             "matricula_curso": None,
+                            "hablla_board_id": None,
+                            "hablla_list_id": None,
                             "hablla_card_status": None,
                             "hablla_em_atendimento": False,
                             "s3_estagio": None,
