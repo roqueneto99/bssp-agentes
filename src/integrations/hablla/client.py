@@ -508,6 +508,37 @@ class HabllaClient:
         return data if isinstance(data, dict) else {}
 
     # ------------------------------------------------------------------
+    # BOARDS / LISTS  (necessário pra resolver curso e etapa de um card)
+    # ------------------------------------------------------------------
+
+    async def list_boards(self, *, page: int = 1, limit: int = 100) -> list[dict]:
+        """Lista todos os boards (cada curso costuma ser um board)."""
+        path = self._ws_path("v1", "boards")
+        data = await self._request(
+            "GET", path, params={"page": page, "limit": limit},
+        )
+        if isinstance(data, dict):
+            return data.get("results", [])
+        return data if isinstance(data, list) else []
+
+    async def list_lists(
+        self,
+        *,
+        board_id: Optional[str] = None,
+        page: int = 1,
+        limit: int = 200,
+    ) -> list[dict]:
+        """Lista todas as lists (etapas dentro dos boards). Pode filtrar por board."""
+        path = self._ws_path("v1", "lists")
+        params: dict[str, Any] = {"page": page, "limit": limit}
+        if board_id:
+            params["board"] = board_id
+        data = await self._request("GET", path, params=params)
+        if isinstance(data, dict):
+            return data.get("results", [])
+        return data if isinstance(data, list) else []
+
+    # ------------------------------------------------------------------
     # USERS
     # ------------------------------------------------------------------
 

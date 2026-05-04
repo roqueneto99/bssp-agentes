@@ -89,15 +89,27 @@ class LeadSyncResult:
 class SyncStats:
     total: int = 0
     updated: int = 0
+    dry_run: int = 0
     no_match: int = 0
     no_email: int = 0
     errors: int = 0
+    sample_fields: list[dict] = field(default_factory=list)
     started_at: datetime = field(default_factory=lambda: datetime.now(TZ_BRT))
 
     def add(self, r: LeadSyncResult) -> None:
         self.total += 1
         if r.status == "updated":
             self.updated += 1
+        elif r.status == "dry_run":
+            self.dry_run += 1
+            # guarda os primeiros 3 pra inspeção rápida
+            if len(self.sample_fields) < 3:
+                self.sample_fields.append({
+                    "lead_id": r.lead_id, "email": r.email, **{
+                        k: (v.isoformat() if isinstance(v, datetime) else v)
+                        for k, v in r.fields.items()
+                    },
+                })
         elif r.status == "no_match":
             self.no_match += 1
         elif r.status == "no_email":
@@ -109,9 +121,11 @@ class SyncStats:
         return {
             "total": self.total,
             "updated": self.updated,
+            "dry_run": self.dry_run,
             "no_match": self.no_match,
             "no_email": self.no_email,
             "errors": self.errors,
+            "sample_fields": self.sample_fields,
             "started_at": self.started_at.isoformat(),
             "duration_s": (datetime.now(TZ_BRT) - self.started_at).total_seconds(),
         }
@@ -121,58 +135,92 @@ class SyncStats:
 # Extração de campos do Hablla
 # ----------------------------------------------------------------------
 
-def _extract_consultor(card: dict, person: dict) -> Optional[str]:
-    """Tenta extrair o nome do consultor responsável. Defensivo — Hablla
-    expõe o owner em vários formatos dependendo da versão do endpoint."""
-    for key in ("responsible", "owner", "assigned_user", "user"):
+def _extract_consultor(
+    card: dict, person: dict, users_map: dict[str, str],
+) -> Optional[str]:
+    """Resolve o nome do consultor responsável. Hablla retorna apenas IDs
+    em card.user/user_id e person.users[]; resolvemos via users_map
+    (id → name) que vem de list_users())."""
+    # 1) consultor é o user dono do card
+    for key in ("user_id", "user"):
         v = card.get(key)
-        if isinstance(v, dict):
-            name = v.get("name") or v.get("full_name") or v.get("email")
+        if isinstance(v, str) and v.strip():
+            name = users_map.get(v.strip())
             if name:
-                return str(name).strip()
-        elif isinstance(v, str) and v.strip():
-            return v.strip()
-    # Fallback: owner da pessoa
-    for key in ("owner", "responsible"):
-        v = person.get(key)
+                return name
         if isinstance(v, dict):
-            name = v.get("name") or v.get("full_name") or v.get("email")
-            if name:
-                return str(name).strip()
-        elif isinstance(v, str) and v.strip():
-            return v.strip()
+            inner = v.get("id") or v.get("_id")
+            if inner and users_map.get(inner):
+                return users_map[inner]
+            n = v.get("name") or v.get("full_name") or v.get("email")
+            if n:
+                return str(n).strip()
+
+    # 2) fallback: primeiro user atribuído à pessoa
+    raw_users = person.get("users") or []
+    if isinstance(raw_users, list):
+        for u in raw_users:
+            uid = u if isinstance(u, str) else (u.get("id") if isinstance(u, dict) else None)
+            if uid and users_map.get(uid):
+                return users_map[uid]
+
     return None
 
 
-def _extract_curso(card: dict) -> Optional[str]:
-    """O 'curso/programa' costuma ser o nome do board/list ao qual o card
+def _extract_curso(card: dict, boards_map: dict[str, str]) -> Optional[str]:
+    """O 'curso/programa' costuma ser o nome do BOARD ao qual o card
     pertence (cada curso tem seu pipeline na Hablla)."""
-    for key in ("list", "board", "stage", "pipeline"):
+    for key in ("board_id", "board"):
         v = card.get(key)
-        if isinstance(v, dict):
-            name = v.get("name") or v.get("title")
+        if isinstance(v, str) and v.strip():
+            name = boards_map.get(v.strip())
             if name:
-                return str(name).strip()
-        elif isinstance(v, str) and v.strip():
-            return v.strip()
-    # Última tentativa: o próprio nome do card
-    name = card.get("name") or card.get("title")
-    if name:
-        return str(name).strip()
+                return name
+        if isinstance(v, dict):
+            inner = v.get("id") or v.get("_id")
+            if inner and boards_map.get(inner):
+                return boards_map[inner]
+            n = v.get("name") or v.get("title")
+            if n:
+                return str(n).strip()
+    return None
+
+
+def _extract_estagio(card: dict, lists_map: dict[str, str]) -> Optional[str]:
+    """A 'etapa' do funil é o nome da LIST a que o card pertence."""
+    for key in ("list_id", "list"):
+        v = card.get(key)
+        if isinstance(v, str) and v.strip():
+            name = lists_map.get(v.strip())
+            if name:
+                return name[:64]
+        if isinstance(v, dict):
+            inner = v.get("id") or v.get("_id")
+            if inner and lists_map.get(inner):
+                return lists_map[inner][:64]
+            n = v.get("name") or v.get("title")
+            if n:
+                return str(n).strip()[:64]
     return None
 
 
 def _normalize_card_status(raw: str) -> Optional[str]:
+    """Hablla usa statuses customizáveis. Mantém o valor literal mas
+    enxuga os mais comuns pra poder filtrar com confiança."""
     s = (raw or "").lower().strip()
-    if s in ("open", "aberto", "em_andamento", "in_progress"):
+    if not s:
+        return None
+    # apertando vocabulário pra os que importam pro card aberto/atendendo
+    if s in ("open", "aberto", "em_andamento", "in_progress", "in_attendance",
+             "in_bot", "pending", "atendendo", "active", "ativo"):
         return "open"
-    if s in ("won", "ganho", "convertido"):
+    if s in ("won", "ganho", "convertido", "ganhou", "ganha"):
         return "won"
-    if s in ("lost", "perdido"):
+    if s in ("lost", "perdido", "perdida", "cancelled", "cancelado"):
         return "lost"
-    if s:
-        return s[:16]
-    return None
+    if s in ("finished", "concluido", "concluído"):
+        return "finished"
+    return s[:16]
 
 
 def _pick_latest(items: list[dict]) -> Optional[dict]:
@@ -197,8 +245,17 @@ def _parse_iso(dt_str: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def _build_update_payload(person: dict, cards: list[dict], services: list[dict]) -> dict[str, Any]:
-    """Traduz a resposta da Hablla para os campos da tabela `leads`."""
+def _build_update_payload(
+    person: dict,
+    cards: list[dict],
+    services: list[dict],
+    *,
+    users_map: dict[str, str],
+    boards_map: dict[str, str],
+    lists_map: dict[str, str],
+) -> dict[str, Any]:
+    """Traduz a resposta da Hablla para os campos da tabela `leads`.
+    Os 3 maps são caches id→name carregados antes do batch."""
 
     payload: dict[str, Any] = {
         "hablla_person_id": str(person.get("id") or person.get("_id") or "")[:64] or None,
@@ -216,19 +273,12 @@ def _build_update_payload(person: dict, cards: list[dict], services: list[dict])
     if cards:
         latest_card = _pick_latest(cards)
         if latest_card:
-            payload["consultor"] = _extract_consultor(latest_card, person)
-            payload["matricula_curso"] = _extract_curso(latest_card)
+            payload["consultor"] = _extract_consultor(latest_card, person, users_map)
+            payload["matricula_curso"] = _extract_curso(latest_card, boards_map)
             payload["hablla_card_status"] = _normalize_card_status(
                 latest_card.get("status", "")
             )
-            # s3_estagio = nome do estágio (list.name) se existir
-            stage = latest_card.get("list") or latest_card.get("stage")
-            if isinstance(stage, dict):
-                stage_name = stage.get("name")
-                if stage_name:
-                    payload["s3_estagio"] = str(stage_name)[:64]
-            elif isinstance(stage, str):
-                payload["s3_estagio"] = stage[:64]
+            payload["s3_estagio"] = _extract_estagio(latest_card, lists_map)
 
         # Há card aberto?
         for c in cards:
@@ -324,15 +374,73 @@ async def _ensure_columns() -> None:
 # Sync de um lead
 # ----------------------------------------------------------------------
 
+async def _build_resolution_maps(hablla: HabllaClient) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """Carrega users, boards e lists do Hablla e devolve 3 dicts id→name.
+    Falhas individuais não derrubam o sync — só voltam dict vazio."""
+    users_map: dict[str, str] = {}
+    boards_map: dict[str, str] = {}
+    lists_map: dict[str, str] = {}
+
+    try:
+        users = await hablla.list_users()
+        for member in users or []:
+            inner = member.get("user") if isinstance(member, dict) else None
+            if isinstance(inner, dict):
+                uid = str(inner.get("id") or inner.get("_id") or "")
+                name = inner.get("name") or inner.get("full_name") or inner.get("email")
+                if uid and name:
+                    users_map[uid] = str(name).strip()
+            # também aceita user no nível raiz
+            uid_raw = str(member.get("id") or "") if isinstance(member, dict) else ""
+            name_raw = (member.get("name") if isinstance(member, dict) else None)
+            if uid_raw and name_raw and uid_raw not in users_map:
+                users_map[uid_raw] = str(name_raw).strip()
+    except Exception as e:
+        logger.warning("Falha ao carregar users do Hablla: %s", e)
+
+    try:
+        boards = await hablla.list_boards(limit=200)
+        for b in boards or []:
+            bid = str(b.get("id") or b.get("_id") or "")
+            name = b.get("name") or b.get("title")
+            if bid and name:
+                boards_map[bid] = str(name).strip()
+    except Exception as e:
+        logger.warning("Falha ao carregar boards do Hablla: %s", e)
+
+    try:
+        lists = await hablla.list_lists(limit=500)
+        for l in lists or []:
+            lid = str(l.get("id") or l.get("_id") or "")
+            name = l.get("name") or l.get("title")
+            if lid and name:
+                lists_map[lid] = str(name).strip()
+    except Exception as e:
+        logger.warning("Falha ao carregar lists do Hablla: %s", e)
+
+    logger.info(
+        "Maps carregados: users=%d boards=%d lists=%d",
+        len(users_map), len(boards_map), len(lists_map),
+    )
+    return users_map, boards_map, lists_map
+
+
 async def sync_one_lead(
     hablla: HabllaClient,
     lead_id: int,
     email: str,
     *,
     dry_run: bool = False,
+    users_map: Optional[dict[str, str]] = None,
+    boards_map: Optional[dict[str, str]] = None,
+    lists_map: Optional[dict[str, str]] = None,
 ) -> LeadSyncResult:
     """Sincroniza um lead. Idempotente — sempre atualiza com o estado
     atual da Hablla."""
+
+    # Carrega maps localmente se não vieram (ex.: chamada single-shot)
+    if users_map is None or boards_map is None or lists_map is None:
+        users_map, boards_map, lists_map = await _build_resolution_maps(hablla)
 
     if not email:
         return LeadSyncResult(lead_id=lead_id, email="", status="no_email")
@@ -387,7 +495,10 @@ async def sync_one_lead(
         elif isinstance(svcs_data, Exception):
             logger.warning("Services fail %s: %s", email, svcs_data)
 
-        payload = _build_update_payload(person, cards, services)
+        payload = _build_update_payload(
+            person, cards, services,
+            users_map=users_map, boards_map=boards_map, lists_map=lists_map,
+        )
         payload["hablla_synced_at"] = datetime.now(timezone.utc)
         payload["id"] = lead_id
 
@@ -456,20 +567,27 @@ async def run_incremental_sync(
 
     hablla = HabllaClient(api_token=token, workspace_id=workspace)
     try:
+        # Carrega maps id→name uma vez por batch (rate-limit friendly)
+        users_map, boards_map, lists_map = await _build_resolution_maps(hablla)
+
         for row in rows:
             r = await sync_one_lead(
-                hablla, row["id"], row["email"], dry_run=dry_run,
+                hablla, row["id"], row["email"],
+                dry_run=dry_run,
+                users_map=users_map,
+                boards_map=boards_map,
+                lists_map=lists_map,
             )
             stats.add(r)
             if r.status == "error":
                 logger.warning("erro lead %s: %s", r.lead_id, r.error)
-            elif r.status == "updated":
-                # Log compacto pros campos preenchidos
+            elif r.status in ("updated", "dry_run"):
                 preenchidos = {
                     k: v for k, v in r.fields.items()
                     if v not in (None, False, "")
                 }
-                logger.info("lead %s ok — %s", r.lead_id, list(preenchidos.keys()))
+                logger.info("lead %s %s — %s",
+                            r.lead_id, r.status, list(preenchidos.keys()))
     finally:
         await hablla.close()
 
