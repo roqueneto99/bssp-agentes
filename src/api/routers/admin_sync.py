@@ -120,3 +120,54 @@ async def debug_hablla_raw(
         }
     finally:
         await h.close()
+
+
+@router.get("/hablla/maps")
+async def debug_hablla_maps(
+    x_admin_token: Optional[str] = Header(default=None),
+):
+    """Mostra status dos 3 maps id→name (users, boards, lists) que o sync usa."""
+    _check_token(x_admin_token)
+    from src.integrations.hablla.client import HabllaClient
+    from src.sync.hablla_lead_sync import _build_resolution_maps
+    token = os.getenv("HABLLA_API_TOKEN", "")
+    workspace = os.getenv("HABLLA_WORKSPACE_ID", "")
+    if not token or not workspace:
+        raise HTTPException(500, "HABLLA_API_TOKEN/HABLLA_WORKSPACE_ID ausentes")
+
+    h = HabllaClient(api_token=token, workspace_id=workspace)
+    try:
+        # Tenta cada endpoint individualmente pra reportar erros separados
+        result = {}
+        try:
+            users_raw = await h.list_users()
+            result["users_raw_count"] = len(users_raw or [])
+            result["users_raw_sample"] = users_raw[:2] if users_raw else []
+        except Exception as e:
+            result["users_error"] = str(e)
+
+        try:
+            boards_raw = await h.list_boards(limit=200)
+            result["boards_raw_count"] = len(boards_raw or [])
+            result["boards_raw_sample"] = boards_raw[:3] if boards_raw else []
+        except Exception as e:
+            result["boards_error"] = str(e)
+
+        try:
+            lists_raw = await h.list_lists(limit=500)
+            result["lists_raw_count"] = len(lists_raw or [])
+            result["lists_raw_sample"] = lists_raw[:3] if lists_raw else []
+        except Exception as e:
+            result["lists_error"] = str(e)
+
+        users_map, boards_map, lists_map = await _build_resolution_maps(h)
+        result["users_map_size"] = len(users_map)
+        result["boards_map_size"] = len(boards_map)
+        result["lists_map_size"] = len(lists_map)
+        # mostra alguns pares pra inspeção
+        result["users_map_sample"] = dict(list(users_map.items())[:5])
+        result["boards_map_sample"] = dict(list(boards_map.items())[:5])
+        result["lists_map_sample"] = dict(list(lists_map.items())[:5])
+        return result
+    finally:
+        await h.close()
