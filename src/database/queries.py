@@ -300,13 +300,18 @@ async def save_execution(resultado: dict) -> None:
                 lead.s1_processado_em = datetime.utcnow()
 
             resumo_s2 = resultado.get("resumo_squad2", {})
-            if resumo_s2 and resumo_s2.get("classificacao"):
+            if resumo_s2 and resumo_s2.get("classificacao") and resumo_s2.get("classificacao") != "-":
+                import json as _json
+                # briefing_comercial pode vir como dict estruturado — coluna eh VARCHAR
+                briefing = resumo_s2.get("briefing_comercial")
+                if isinstance(briefing, (dict, list)):
+                    briefing = _json.dumps(briefing, ensure_ascii=False)
                 lead.s2_score = resumo_s2.get("score_total")
                 lead.s2_classificacao = resumo_s2.get("classificacao")
                 lead.s2_rota = resumo_s2.get("rota")
                 lead.s2_acoes = resumo_s2.get("acoes_recomendadas")
                 lead.s2_dimensoes = resumo_s2.get("dimensoes")
-                lead.s2_briefing = resumo_s2.get("briefing_comercial")
+                lead.s2_briefing = briefing
                 lead.s2_tags = resumo_s2.get("tags_aplicadas")
                 lead.s2_pode_seguir_squad3 = resumo_s2.get("pode_seguir_squad3", False)
                 lead.s2_processado_em = datetime.utcnow()
