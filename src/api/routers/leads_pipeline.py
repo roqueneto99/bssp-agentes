@@ -1,7 +1,9 @@
 """
 Endpoints FastAPI pro Kanban — bssp-agentes/src/api/routers/leads_pipeline.py
 
-v2 — adaptado ao schema real da tabela `leads` (descoberto em 03/05/2026):
+v3 — usa SQLAlchemy async (padrão do projeto, não asyncpg direto)
+
+Schema real da tabela `leads`:
 - id INTEGER (não UUID)
 - name (não nome)
 - rd_created_at (não criado_em)
@@ -13,8 +15,6 @@ v2 — adaptado ao schema real da tabela `leads` (descoberto em 03/05/2026):
 Endpoints:
   GET   /api/leads/pipeline?periodo=30d       — agrupa por classificação
   PATCH /api/leads/{lead_id}/classificacao    — move lead entre colunas
-
-Auth removida temporariamente (NextAuth integra na Sprint 1).
 """
 from __future__ import annotations
 
@@ -22,11 +22,11 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Literal, Optional
 
-import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 
-from src.database.pool import get_pool
+from src.database.connection import get_session
 
 router = APIRouter(prefix="/api/leads", tags=["leads-pipeline"])
 TZ_BRT = timezone(timedelta(hours=-3))
@@ -50,7 +50,7 @@ class CadenciaInline(BaseModel):
 
 
 class LeadCard(BaseModel):
-    id: str  # serializado como string (banco usa int) pra simplificar no React
+    id: str
     nome: str
     email: str
     iniciais: str = Field(..., min_length=1, max_length=3)
@@ -66,7 +66,6 @@ class LeadCard(BaseModel):
 
 
 class PipelineResponse(BaseModel):
-    """Mapa classificacao -> [LeadCard]."""
     COLD: list[LeadCard] = []
     SAL: list[LeadCard] = []
     MQL: list[LeadCard] = []
@@ -82,9 +81,6 @@ class MoveClassificacaoBody(BaseModel):
 
 # ---------- SQL ----------
 
-# Normaliza classificações sujas pra valores Kanban válidos.
-# - "CLIENTE" do Squad 2 → CONVERTIDO no Kanban (matriculado)
-# - "-" e qualquer outra → COLD
 CLASSIFICACAO_NORMALIZE_SQL = """
 CASE
     WHEN UPPER(COALESCE(s2_classificacao, cf_classificacao, '')) = 'CLIENTE' THEN 'CONVERTIDO'
@@ -119,8 +115,8 @@ WITH leads_filtrados AS (
         l.consultor,
         l.matricula_curso
     FROM leads l
-    WHERE COALESCE(l.ultima_interacao_em, l.last_conversion_date, l.rd_created_at) >= $1
-       OR l.s2_processado_em >= $1
+    WHERE COALESCE(l.ultima_interacao_em, l.last_conversion_date, l.rd_created_at) >= :desde
+       OR l.s2_processado_em >= :desde
 )
 SELECT *,
        ROW_NUMBER() OVER (
@@ -137,18 +133,13 @@ FROM leads_filtrados
 async def get_pipeline(
     periodo: Literal["7d", "30d", "90d", "365d"] = Query(default="30d"),
     limit_por_coluna: int = Query(default=50, ge=10, le=200),
-    pool: asyncpg.Pool = Depends(get_pool),
 ) -> PipelineResponse:
-    """
-    Retorna leads agrupados por classificação Kanban.
-    Período filtra por última interação (last_conversion_date / rd_created_at).
-    Limit por coluna evita payload gigante (default 50, max 200).
-    """
     dias = {"7d": 7, "30d": 30, "90d": 90, "365d": 365}[periodo]
     desde = datetime.now(TZ_BRT) - timedelta(days=dias)
 
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(SQL_PIPELINE, desde)
+    async with get_session() as session:
+        result = await session.execute(text(SQL_PIPELINE), {"desde": desde})
+        rows = result.mappings().all()
 
     response = PipelineResponse()
     for row in rows:
@@ -166,13 +157,12 @@ async def get_pipeline(
                 classificacao=row["classificacao"],
                 ultima_interacao_em=row["ultima_interacao_em"],
                 lgpd_conforme=bool(row["lgpd_conforme"]),
-                cadencia=None,  # cadencias separadas, lookup futuro
+                cadencia=None,
                 consultor=row["consultor"],
                 matricula_curso=row["matricula_curso"],
             )
             getattr(response, row["classificacao"]).append(card)
         except Exception:
-            # ignora linhas mal formadas (dados antigos com inconsistências)
             continue
 
     return response
@@ -180,45 +170,40 @@ async def get_pipeline(
 
 # ---------- PATCH /api/leads/{lead_id}/classificacao ----------
 
-SQL_MOVE = """
+SQL_MOVE = text("""
 UPDATE leads
 SET
-    cf_classificacao = $2,
+    cf_classificacao = :para,
     classificacao_origem = 'manual',
-    classificacao_atualizada_em = $3
-WHERE id = $1
+    classificacao_atualizada_em = :agora
+WHERE id = :lead_id
 RETURNING id, name, cf_classificacao
-"""
+""")
 
 
 @router.patch("/{lead_id}/classificacao", response_model=LeadCard)
 async def move_lead_classificacao(
     lead_id: int,
     body: MoveClassificacaoBody,
-    pool: asyncpg.Pool = Depends(get_pool),
 ) -> LeadCard:
-    """
-    Move um lead pra outra coluna do Kanban.
-    Sobrescreve a classificação até a próxima conversão / scoring run.
-    """
     agora = datetime.now(TZ_BRT)
 
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            atual = await conn.fetchrow(
-                "SELECT cf_classificacao FROM leads WHERE id = $1 FOR UPDATE",
-                lead_id,
-            )
-            if not atual:
-                raise HTTPException(404, "lead não encontrado")
+    async with get_session() as session:
+        atual = await session.execute(
+            text("SELECT cf_classificacao FROM leads WHERE id = :id"),
+            {"id": lead_id},
+        )
+        row = atual.first()
+        if not row:
+            raise HTTPException(404, "lead não encontrado")
 
-            await conn.execute(SQL_MOVE, lead_id, body.para.value, agora)
+        await session.execute(SQL_MOVE, {"para": body.para.value, "agora": agora, "lead_id": lead_id})
 
-    return await _carregar_lead_card(pool, lead_id)
+    return await _carregar_lead_card(lead_id)
 
 
-async def _carregar_lead_card(pool: asyncpg.Pool, lead_id: int) -> LeadCard:
-    sql = f"""
+async def _carregar_lead_card(lead_id: int) -> LeadCard:
+    sql = text(f"""
     SELECT
         l.id,
         COALESCE(l.name, '(sem nome)') AS nome,
@@ -235,10 +220,11 @@ async def _carregar_lead_card(pool: asyncpg.Pool, lead_id: int) -> LeadCard:
         COALESCE(l.lgpd_conforme, false) AS lgpd_conforme,
         l.consultor, l.matricula_curso
     FROM leads l
-    WHERE l.id = $1
-    """
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(sql, lead_id)
+    WHERE l.id = :id
+    """)
+    async with get_session() as session:
+        result = await session.execute(sql, {"id": lead_id})
+        row = result.mappings().first()
         if not row:
             raise HTTPException(404, "lead não encontrado")
         return LeadCard(
