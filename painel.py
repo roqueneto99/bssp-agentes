@@ -21,14 +21,15 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks,
+from pydantic import BaseModel FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
