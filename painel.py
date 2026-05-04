@@ -42,8 +42,9 @@ from src.integrations.hablla.client import HabllaClient
 from src.integrations.sendgrid import SendGridClient, SendGridConfig
 from src.database.queries_squad3 import MensagensRepository, NullMensagensRepo
 from src.webhooks import sendgrid_receiver as sendgrid_webhook
+from src.webhooks import hablla_receiver as hablla_webhook
 from src.orquestrador import run as run_orquestrador
-from src.api.routers import leads_pipeline, leads_summary, admin_sync
+from src.api.routers import leads_pipeline, leads_summary, admin_sync, conversas
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 logger = logging.getLogger("painel")
@@ -193,10 +194,12 @@ async def _provisionar_custom_fields(rd: RDStationClient) -> None:
 
 # Mount webhook routers
 app.include_router(sendgrid_webhook.router)
+app.include_router(hablla_webhook.router)
 # IMPORTANTE: leads_summary ANTES de leads_pipeline. O pipeline tem
 # @router.get("/{lead_id}") que captura /summary se vier depois.
 app.include_router(leads_summary.router)
 app.include_router(leads_pipeline.router)
+app.include_router(conversas.router)
 app.include_router(admin_sync.router)
 
 

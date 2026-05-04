@@ -281,6 +281,88 @@ async def bulk_hablla_map(
     return {"ok": True, "upserts": inserted}
 
 
+@router.get("/hablla/probe-webhooks")
+async def probe_webhooks(
+    x_admin_token: Optional[str] = Header(default=None),
+):
+    """Tenta listar webhooks do Hablla com o token atual. Reporta status
+    de cada endpoint candidato — pra saber se dá pra registrar via API
+    ou se o Roque precisa cadastrar manualmente na UI."""
+    _check_token(x_admin_token)
+    from src.integrations.hablla.client import HabllaClient, HabllaError
+    token = os.getenv("HABLLA_API_TOKEN", "")
+    workspace = os.getenv("HABLLA_WORKSPACE_ID", "")
+    h = HabllaClient(api_token=token, workspace_id=workspace)
+    out: dict = {}
+    try:
+        candidatos = [
+            ("v1", "webhooks"),
+            ("v2", "webhooks"),
+            ("v1", "events/subscriptions"),
+            ("v1", "subscriptions"),
+        ]
+        for version, resource in candidatos:
+            path = h._ws_path(version, resource)
+            try:
+                data = await h._request("GET", path, params={"page": 1, "limit": 5})
+                if isinstance(data, dict):
+                    results = data.get("results", [])
+                    out[f"{version}/{resource}"] = {
+                        "ok": True,
+                        "results_count": len(results),
+                        "keys": list(data.keys())[:8],
+                        "first_result_keys": list(results[0].keys())[:10] if results else [],
+                    }
+                elif isinstance(data, list):
+                    out[f"{version}/{resource}"] = {"ok": True, "list_count": len(data)}
+                else:
+                    out[f"{version}/{resource}"] = {"ok": True, "shape": type(data).__name__}
+            except HabllaError as e:
+                out[f"{version}/{resource}"] = {"ok": False, "status": e.status_code}
+            except Exception as e:
+                out[f"{version}/{resource}"] = {"ok": False, "exc": str(e)[:100]}
+    finally:
+        await h.close()
+    return out
+
+
+class WebhookSetup(BaseModel):
+    target_url: str = Field(..., description="URL pública do receiver (ex: https://bssp-agentes-production.up.railway.app/api/webhooks/hablla)")
+    events: Optional[list[str]] = Field(default=None, description="lista de eventos (se Hablla aceitar). Se None, todos.")
+
+
+@router.post("/hablla/setup-webhook")
+async def setup_webhook(
+    body: WebhookSetup = Body(...),
+    x_admin_token: Optional[str] = Header(default=None),
+):
+    """Tenta registrar o webhook via API. Se o token não tiver permissão,
+    retorna o erro pra Roque cadastrar manualmente. Tenta v1, v2."""
+    _check_token(x_admin_token)
+    from src.integrations.hablla.client import HabllaClient, HabllaError
+    token = os.getenv("HABLLA_API_TOKEN", "")
+    workspace = os.getenv("HABLLA_WORKSPACE_ID", "")
+    h = HabllaClient(api_token=token, workspace_id=workspace)
+    body_payload: dict = {"url": body.target_url, "target_url": body.target_url}
+    if body.events:
+        body_payload["events"] = body.events
+    out: dict = {}
+    try:
+        for version in ("v1", "v2"):
+            path = h._ws_path(version, "webhooks")
+            try:
+                data = await h._request("POST", path, json=body_payload)
+                out[f"{version}/webhooks"] = {"ok": True, "result": data}
+                return {"created_via": version, "result": data}
+            except HabllaError as e:
+                out[f"{version}/webhooks"] = {"ok": False, "status": e.status_code, "msg": (e.message or "")[:200]}
+            except Exception as e:
+                out[f"{version}/webhooks"] = {"ok": False, "exc": str(e)[:150]}
+    finally:
+        await h.close()
+    return {"created_via": None, "attempts": out}
+
+
 @router.get("/hablla/discover-ids")
 async def discover_card_ids(
     limit: int = Query(default=60, ge=1, le=200),
