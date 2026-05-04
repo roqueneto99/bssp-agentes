@@ -512,14 +512,23 @@ class HabllaClient:
     # ------------------------------------------------------------------
 
     async def list_boards(self, *, page: int = 1, limit: int = 100) -> list[dict]:
-        """Lista todos os boards (cada curso costuma ser um board)."""
-        path = self._ws_path("v1", "boards")
-        data = await self._request(
-            "GET", path, params={"page": page, "limit": limit},
-        )
-        if isinstance(data, dict):
-            return data.get("results", [])
-        return data if isinstance(data, list) else []
+        """Lista todos os boards (cada curso costuma ser um board).
+        Tenta v2 primeiro (token de integração só tem permissão lá), fallback v1."""
+        for version in ("v2", "v1"):
+            path = self._ws_path(version, "boards")
+            try:
+                data = await self._request(
+                    "GET", path, params={"page": page, "limit": limit},
+                )
+                if isinstance(data, dict):
+                    return data.get("results", [])
+                return data if isinstance(data, list) else []
+            except HabllaError as e:
+                if e.status_code in (401, 403, 404):
+                    logger.info("list_boards %s falhou: %s — tentando próximo", version, e.status_code)
+                    continue
+                raise
+        return []
 
     async def list_lists(
         self,
@@ -528,29 +537,66 @@ class HabllaClient:
         page: int = 1,
         limit: int = 200,
     ) -> list[dict]:
-        """Lista todas as lists (etapas dentro dos boards). Pode filtrar por board."""
-        path = self._ws_path("v1", "lists")
-        params: dict[str, Any] = {"page": page, "limit": limit}
+        """Lista as lists (etapas). Hablla não tem /lists global; ficam
+        aninhadas em /boards/{id}/lists. Se board_id for None, agrega
+        de todos os boards conhecidos."""
         if board_id:
-            params["board"] = board_id
-        data = await self._request("GET", path, params=params)
-        if isinstance(data, dict):
-            return data.get("results", [])
-        return data if isinstance(data, list) else []
+            for version in ("v2", "v1"):
+                path = self._ws_path(version, f"boards/{board_id}/lists")
+                try:
+                    data = await self._request(
+                        "GET", path, params={"page": page, "limit": limit},
+                    )
+                    if isinstance(data, dict):
+                        return data.get("results", [])
+                    return data if isinstance(data, list) else []
+                except HabllaError as e:
+                    if e.status_code in (401, 403, 404):
+                        continue
+                    raise
+            return []
+
+        # Sem board_id: percorre todos os boards e concatena as lists
+        boards = await self.list_boards(limit=200)
+        all_lists: list[dict] = []
+        for b in boards:
+            bid = str(b.get("id") or b.get("_id") or "")
+            if not bid:
+                continue
+            try:
+                lists = await self.list_lists(board_id=bid, limit=limit)
+                # injeta board_id nas lists pra correlacionar depois
+                for l in lists:
+                    if isinstance(l, dict) and "board_id" not in l:
+                        l["board_id"] = bid
+                all_lists.extend(lists)
+            except Exception as e:
+                logger.warning("list_lists(board=%s) falhou: %s", bid, e)
+        return all_lists
 
     # ------------------------------------------------------------------
     # USERS
     # ------------------------------------------------------------------
 
-    async def list_users(self) -> list[dict]:
-        """Lista usuários do workspace."""
-        path = self._ws_path("v1", "users")
-        data = await self._request("GET", path)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            return data.get("results", [])
-        return []
+    async def list_users(self, *, limit_per_page: int = 100, max_pages: int = 20) -> list[dict]:
+        """Lista usuários do workspace, paginado. Por padrão pega até 2000 users."""
+        out: list[dict] = []
+        for page in range(1, max_pages + 1):
+            path = self._ws_path("v1", "users")
+            data = await self._request(
+                "GET", path, params={"page": page, "limit": limit_per_page},
+            )
+            page_items: list = []
+            if isinstance(data, list):
+                page_items = data
+            elif isinstance(data, dict):
+                page_items = data.get("results", []) or []
+            if not page_items:
+                break
+            out.extend(page_items)
+            if len(page_items) < limit_per_page:
+                break
+        return out
 
     # ------------------------------------------------------------------
     # UTILITÁRIOS
