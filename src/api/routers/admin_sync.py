@@ -199,6 +199,85 @@ async def bulk_hablla_map(
     return {"ok": True, "upserts": inserted}
 
 
+@router.get("/hablla/discover-ids")
+async def discover_card_ids(
+    limit: int = Query(default=60, ge=1, le=200),
+    x_admin_token: Optional[str] = Header(default=None),
+):
+    """Lê os cards dos leads já sincronizados e retorna board_ids,
+    list_ids e user_ids únicos, com contagem. Os IDs marcados com
+    `mapped=false` precisam ser cadastrados via POST /map."""
+    _check_token(x_admin_token)
+    from src.integrations.hablla.client import HabllaClient
+    from src.sync.hablla_lead_sync import _load_manual_maps
+    token = os.getenv("HABLLA_API_TOKEN", "")
+    workspace = os.getenv("HABLLA_WORKSPACE_ID", "")
+
+    # Pega leads que já têm hablla_person_id
+    async with get_session() as session:
+        result = await session.execute(text("""
+        SELECT id, email, hablla_person_id
+        FROM leads
+        WHERE hablla_person_id IS NOT NULL AND hablla_synced_at IS NOT NULL
+        ORDER BY hablla_synced_at DESC
+        LIMIT :limit
+        """), {"limit": limit})
+        rows = [dict(r) for r in result.mappings().all()]
+
+    h = HabllaClient(api_token=token, workspace_id=workspace)
+    boards: dict[str, int] = {}
+    lists_per_board: dict[str, dict[str, int]] = {}  # board_id -> {list_id: count}
+    users: dict[str, int] = {}
+    try:
+        for row in rows:
+            try:
+                cards = (await h.list_cards(person_id=row["hablla_person_id"], limit=5)).get("results", [])
+            except Exception:
+                continue
+            for card in cards:
+                bid = str(card.get("board") or card.get("board_id") or "")
+                lid = str(card.get("list") or card.get("list_id") or "")
+                uid = str(card.get("user") or card.get("user_id") or "")
+                if bid:
+                    boards[bid] = boards.get(bid, 0) + 1
+                    if bid not in lists_per_board:
+                        lists_per_board[bid] = {}
+                    if lid:
+                        lists_per_board[bid][lid] = lists_per_board[bid].get(lid, 0) + 1
+                if uid:
+                    users[uid] = users.get(uid, 0) + 1
+    finally:
+        await h.close()
+
+    manual = await _load_manual_maps()
+    board_map = manual.get("board", {})
+    list_map = manual.get("list", {})
+    user_map = manual.get("user", {})
+
+    return {
+        "leads_lidos": len(rows),
+        "boards": [
+            {"hablla_id": bid, "count": cnt, "mapped": bid in board_map,
+             "name": board_map.get(bid)}
+            for bid, cnt in sorted(boards.items(), key=lambda x: -x[1])
+        ],
+        "lists_por_board": [
+            {"board_id": bid, "board_name": board_map.get(bid),
+             "lists": [
+                {"hablla_id": lid, "count": cnt, "mapped": lid in list_map,
+                 "name": list_map.get(lid)}
+                for lid, cnt in sorted(ls.items(), key=lambda x: -x[1])
+             ]}
+            for bid, ls in lists_per_board.items()
+        ],
+        "users_em_cards": [
+            {"hablla_id": uid, "count": cnt, "mapped": uid in user_map,
+             "name": user_map.get(uid)}
+            for uid, cnt in sorted(users.items(), key=lambda x: -x[1])
+        ],
+    }
+
+
 @router.get("/hablla/check-user/{user_id}")
 async def check_user_in_map(
     user_id: str,
