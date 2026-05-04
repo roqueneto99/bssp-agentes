@@ -1060,6 +1060,82 @@ async def _execute_sync(mode: str, hours: int) -> dict:
             _sync_status["last_run_at"] = started.isoformat()
 
 
+async def _score_recent_leads_batch(max_leads: int = 20) -> dict:
+    """Roda Squad 1+2 nos N leads mais recentes sem s2_processado_em.
+    Chamado pelo auto-sync apos sync incremental pra popular leads novos.
+
+    Retorna dict com {scored, failed, candidates}.
+    """
+    from sqlalchemy import text
+    from src.database.connection import get_session
+    from src.database.queries import save_execution
+
+    if not pipeline or DATA_MODE != "database":
+        return {"scored": 0, "failed": 0, "candidates": 0, "skipped": True}
+
+    async with get_session() as session:
+        result = await session.execute(text("""
+            SELECT email FROM leads
+            WHERE s2_processado_em IS NULL
+              AND email IS NOT NULL AND email != \'\'
+            ORDER BY rd_created_at DESC NULLS LAST
+            LIMIT :max
+        """), {"max": max_leads})
+        emails = [row[0] for row in result.fetchall()]
+
+    scored, failed = 0, 0
+    for email in emails:
+        if email in running_leads:
+            continue
+        running_leads.add(email)
+        try:
+            results = await pipeline.process_new_lead(
+                email, conversion_identifier="auto_sync_scoring",
+            )
+            resultado = {"email": email, "tipo": "pipeline_completo", "agentes": {}}
+            for r in results:
+                resultado["agentes"][r.agent_name] = {
+                    "success": r.success,
+                    "duration_ms": round(r.duration_ms),
+                    "error": r.error,
+                    "data": r.data,
+                }
+            resumo_s1 = resultado["agentes"].get("squad1_resumo", {}).get("data", {})
+            resultado["resumo_squad1"] = {
+                "temperatura": resumo_s1.get("temperatura", "-"),
+                "prioridade": resumo_s1.get("prioridade_contato", "-"),
+                "area": resumo_s1.get("area_principal", "-"),
+                "compliance": resumo_s1.get("compliance_status", "-"),
+                "pode_seguir": resumo_s1.get("pode_seguir_squad2", False),
+            }
+            resumo_s2 = resultado["agentes"].get("squad2_resumo", {}).get("data", {})
+            resultado["resumo_squad2"] = {
+                "score_total": resumo_s2.get("score_total", 0),
+                "classificacao": resumo_s2.get("classificacao", "-"),
+                "rota": resumo_s2.get("rota", "-"),
+                "acoes_recomendadas": resumo_s2.get("acoes_recomendadas", []),
+                "briefing_comercial": resumo_s2.get("briefing_comercial"),
+                "tags_aplicadas": resumo_s2.get("tags_aplicadas", []),
+                "pode_seguir_squad3": resumo_s2.get("pode_seguir_squad3", False),
+            }
+            scorer_data = resultado["agentes"].get("squad2_scorer", {}).get("data", {})
+            resultado["resumo_squad2"]["dimensoes"] = scorer_data.get("dimensoes", {})
+
+            await save_execution(resultado)
+            scored += 1
+        except Exception as e:
+            logger.warning("auto_score: falha em %s: %s", email, e)
+            failed += 1
+        finally:
+            running_leads.discard(email)
+
+    logger.info(
+        "auto_score: %d scorados, %d falhas, %d candidatos",
+        scored, failed, len(emails),
+    )
+    return {"scored": scored, "failed": failed, "candidates": len(emails)}
+
+
 async def _auto_sync_loop():
     """Loop eterno do scheduler: dispara incremental a cada SYNC_INTERVAL_HOURS
     e full_sync no dia/hora UTC configurados (reconciliacao semanal).
