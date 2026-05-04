@@ -71,14 +71,26 @@ _orquestrador_status: dict = {
     "last_started_at": None,
     "last_finished_at": None,
     "last_summary": None,
+    "progress": {"processed": 0, "total": 0, "current_email": None, "step": "idle"},
 }
 
-async def _run_orquestrador_bg(run_id: str, max_leads: int) -> None:
+async def _orquestrador_progress(processed: int, total: int, current_email, step: str) -> None:
+    """Callback chamado pelo orquestrador a cada lead processado."""
+    _orquestrador_status["progress"] = {
+        "processed": processed,
+        "total": total,
+        "current_email": current_email,
+        "step": step,
+    }
+
+
+async def _run_orquestrador_bg(run_id: str, max_leads: int, emails=None) -> None:
     from datetime import datetime as _dt, timezone as _tz
     _orquestrador_status["running"] = True
     _orquestrador_status["last_run_id"] = run_id
     _orquestrador_status["last_started_at"] = _dt.now(_tz.utc).isoformat()
     _orquestrador_status["last_summary"] = None
+    _orquestrador_status["progress"] = {"processed": 0, "total": 0, "current_email": None, "step": "iniciando"}
     try:
         summary = await run_orquestrador(
             pipeline_obj=pipeline,
@@ -86,6 +98,8 @@ async def _run_orquestrador_bg(run_id: str, max_leads: int) -> None:
             data_mode=DATA_MODE,
             max_leads=max_leads,
             motivo=f"manual_{run_id[:8]}",
+            emails=emails,
+            progress_callback=_orquestrador_progress,
         )
         _orquestrador_status["last_summary"] = summary
     except Exception as e:
@@ -1226,17 +1240,28 @@ async def _auto_sync_loop():
 
 import uuid as _uuid
 
+class OrquestradorRunBody(BaseModel):
+    emails: Optional[List[str]] = None
+
+
 @app.post("/api/orquestrador/run")
 async def trigger_orquestrador(
     background_tasks: BackgroundTasks,
-    max_leads: int = Query(default=30, ge=1, le=200),
+    max_leads: int = Query(default=30, ge=1, le=500),
+    body: Optional[OrquestradorRunBody] = None,
 ):
-    """Dispara em background. Retorna 202 imediato."""
+    """Dispara em background. Retorna 202 imediato.
+
+    Se passar body.emails (lista), processa SOMENTE esses (ignora critérios).
+    Senão, usa critérios automáticos com limite max_leads.
+    """
     if _orquestrador_status["running"]:
         return {"started": False, "reason": "already_running", "current_run": _orquestrador_status["last_run_id"]}
     run_id = str(_uuid.uuid4())
-    background_tasks.add_task(_run_orquestrador_bg, run_id, max_leads)
-    return {"started": True, "run_id": run_id, "max_leads": max_leads, "status_url": "/api/orquestrador/status", "estimated_seconds": max_leads * 30}
+    emails = body.emails if body else None
+    n = len(emails) if emails else max_leads
+    background_tasks.add_task(_run_orquestrador_bg, run_id, max_leads, emails)
+    return {"started": True, "run_id": run_id, "n": n, "status_url": "/api/orquestrador/status", "estimated_seconds": n * 30}
 
 
 @app.get("/api/orquestrador/status")

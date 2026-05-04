@@ -1,33 +1,24 @@
 """
-Agente Orquestrador — bssp-agentes/src/orquestrador.py
+Agente Orquestrador v2 — bssp-agentes/src/orquestrador.py
 
-Detecta leads que mudaram desde o último scoring, re-roda Squad 1+2,
-atualiza score e identifica movimentações de coluna no Kanban.
-
-Critérios de re-scoring (qualquer um dispara):
-  1) nunca foi scorado (s2_processado_em IS NULL)
-  2) sincronizado depois do último scoring (synced_at > s2_processado_em)
-  3) score expirou (s2_processado_em < now - 14 days)
+Diferenças vs v1:
+- Aceita progress_callback opcional (atualizado a cada lead)
+- Aceita lista emails opcional (override da query SQL — útil pro board do front)
 """
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from sqlalchemy import text
 
 logger = logging.getLogger("orquestrador")
 
-# Ranking dos estágios do Kanban — pra detectar promoção vs rebaixamento
 _RANK = {
-    "COLD": 0,
-    "SAL": 1,
-    "MQL": 2,
-    "SQL": 3,
-    "HANDOFF": 4,
-    "CONVERTIDO": 5,
-    "CLIENTE": 5,
+    "COLD": 0, "SAL": 1, "MQL": 2, "SQL": 3, "HANDOFF": 4, "CONVERTIDO": 5, "CLIENTE": 5,
 }
+
+ProgressCallback = Callable[[int, int, Optional[str], str], Awaitable[None]]
 
 
 SQL_CANDIDATOS = text("""
@@ -47,6 +38,12 @@ SQL_CANDIDATOS = text("""
     LIMIT :max
 """)
 
+SQL_BY_EMAILS = text("""
+    SELECT email, s2_classificacao, COALESCE(s2_score, 0)::int AS s2_score, s2_processado_em
+    FROM leads
+    WHERE email = ANY(:emails)
+""")
+
 
 async def run(
     pipeline_obj,
@@ -54,19 +51,19 @@ async def run(
     data_mode: str,
     max_leads: int = 30,
     motivo: str = "scheduled",
+    emails: Optional[list[str]] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> dict:
     """
-    Executa o orquestrador.
+    Executa orquestrador.
 
     Args:
-        pipeline_obj: instância de pipeline (do painel) que tem .process_new_lead()
-        running_set: set global do painel pra evitar processar mesmo email 2x
-        data_mode: "database" ou outro — só roda se database
-        max_leads: teto de leads por execução
-        motivo: tag de origem (auto_sync | manual | etc)
+        emails: se passado, processa SOMENTE esses (ignora critérios de mudança).
+                Útil pra re-scorar leads visíveis num board específico.
+        progress_callback: async fn (processed, total, current_email, step).
+                Chamado antes de cada lead e ao final.
 
-    Retorna dict com summary: candidates, novos, promovidos, rebaixados,
-    inalterados, falhas, e detalhe das mudanças (até 20).
+    Retorna summary igual ao v1.
     """
     from src.database.connection import get_session
     from src.database.queries import save_execution
@@ -75,27 +72,37 @@ async def run(
         return {"skipped": True, "motivo": motivo}
 
     async with get_session() as session:
-        result = await session.execute(SQL_CANDIDATOS, {"max": max_leads})
+        if emails:
+            result = await session.execute(SQL_BY_EMAILS, {"emails": emails})
+        else:
+            result = await session.execute(SQL_CANDIDATOS, {"max": max_leads})
         candidatos = [dict(row) for row in result.mappings().all()]
 
+    total = len(candidatos)
     promovidos: list[dict] = []
     rebaixados: list[dict] = []
     novos = inalterados = falhas = 0
 
-    for c in candidatos:
+    if progress_callback:
+        await progress_callback(0, total, None, "iniciando")
+
+    for i, c in enumerate(candidatos):
         email = c["email"]
         before_class = c.get("s2_classificacao")
         before_score = int(c.get("s2_score") or 0)
 
+        if progress_callback:
+            await progress_callback(i, total, email, "processando")
+
         if email in running_set:
+            if progress_callback:
+                await progress_callback(i + 1, total, email, "skipped")
             continue
         running_set.add(email)
         try:
             results = await pipeline_obj.process_new_lead(
                 email, conversion_identifier=f"orquestrador_{motivo}",
             )
-
-            # Constrói resultado igual ao endpoint executar_pipeline
             resultado = {"email": email, "tipo": "pipeline_completo", "agentes": {}}
             for r in results:
                 resultado["agentes"][r.agent_name] = {
@@ -153,21 +160,26 @@ async def run(
             falhas += 1
         finally:
             running_set.discard(email)
+            if progress_callback:
+                await progress_callback(i + 1, total, email, "concluido")
+
+    if progress_callback:
+        await progress_callback(total, total, None, "finalizado")
 
     summary = {
         "motivo": motivo,
-        "candidates": len(candidatos),
+        "candidates": total,
         "novos": novos,
         "promovidos": len(promovidos),
         "rebaixados": len(rebaixados),
         "inalterados": inalterados,
         "falhas": falhas,
-        "promovidos_detalhe": promovidos[:20],
-        "rebaixados_detalhe": rebaixados[:20],
+        "promovidos_detalhe": promovidos[:50],
+        "rebaixados_detalhe": rebaixados[:50],
     }
     logger.info(
         "orquestrador (%s): %d cand · novos=%d promovidos=%d rebaixados=%d inalterados=%d falhas=%d",
-        motivo, len(candidatos), novos, len(promovidos), len(rebaixados), inalterados, falhas,
+        motivo, total, novos, len(promovidos), len(rebaixados), inalterados, falhas,
     )
     for p in promovidos[:5]:
         logger.info(
