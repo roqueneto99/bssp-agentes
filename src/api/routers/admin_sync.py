@@ -281,6 +281,73 @@ async def bulk_hablla_map(
     return {"ok": True, "upserts": inserted}
 
 
+@router.get("/hablla/probe-messages/{email}")
+async def probe_messages(
+    email: str,
+    x_admin_token: Optional[str] = Header(default=None),
+):
+    """Tenta vários endpoints de mensagem com o token atual. Pra cada
+    candidato retorna status (200 / 401 / 404) e se vier 200, conta
+    quantas mensagens veio."""
+    _check_token(x_admin_token)
+    from src.integrations.hablla.client import HabllaClient, HabllaError
+    token = os.getenv("HABLLA_API_TOKEN", "")
+    workspace = os.getenv("HABLLA_WORKSPACE_ID", "")
+    h = HabllaClient(api_token=token, workspace_id=workspace)
+    out: dict = {}
+    try:
+        person = await h.search_person_by_email(email)
+        if not person:
+            return {"error": "email não encontrado no Hablla"}
+        person_id = str(person.get("id") or "")
+        services = (await h.list_services(person_id=person_id, limit=1)).get("results", [])
+        service_id = str(services[0].get("id") or "") if services else ""
+        out["ids"] = {"person_id": person_id, "service_id": service_id}
+
+        candidatos = [
+            ("v1", "messages",                                 "global"),
+            ("v2", "messages",                                 "global v2"),
+            ("v1", f"messages?person={person_id}",             "messages?person"),
+            ("v1", f"persons/{person_id}/messages",            "person nested"),
+            ("v2", f"persons/{person_id}/messages",            "person nested v2"),
+            ("v1", f"services/{service_id}/messages" if service_id else "",  "service nested"),
+            ("v2", f"services/{service_id}/messages" if service_id else "",  "service nested v2"),
+            ("v1", f"services/{service_id}/conversation" if service_id else "", "service conv"),
+            ("v1", "conversations",                            "conversations"),
+            ("v2", "conversations",                            "conversations v2"),
+            ("v1", "chat/messages",                            "chat/messages"),
+        ]
+        for version, resource, label in candidatos:
+            if not resource:
+                continue
+            path = h._ws_path(version, resource)
+            try:
+                data = await h._request("GET", path, params={"page": 1, "limit": 5})
+                if isinstance(data, dict):
+                    results = data.get("results", []) or data.get("data", []) or []
+                    sample_keys = list(results[0].keys())[:10] if results else []
+                    out[f"{label} ({version})"] = {
+                        "ok": True,
+                        "items": len(results) if isinstance(results, list) else 0,
+                        "first_keys": sample_keys,
+                        "first_text": (
+                            (results[0].get("content") or results[0].get("text") or
+                             results[0].get("body") or "")[:80] if results else None
+                        ),
+                    }
+                elif isinstance(data, list):
+                    out[f"{label} ({version})"] = {"ok": True, "items": len(data)}
+                else:
+                    out[f"{label} ({version})"] = {"ok": True, "shape": type(data).__name__}
+            except HabllaError as e:
+                out[f"{label} ({version})"] = {"ok": False, "status": e.status_code}
+            except Exception as e:
+                out[f"{label} ({version})"] = {"ok": False, "exc": str(e)[:80]}
+    finally:
+        await h.close()
+    return out
+
+
 @router.get("/hablla/probe-webhooks")
 async def probe_webhooks(
     x_admin_token: Optional[str] = Header(default=None),
