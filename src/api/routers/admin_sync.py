@@ -122,6 +122,65 @@ async def debug_hablla_raw(
         await h.close()
 
 
+@router.get("/hablla/probe-single/{email}")
+async def probe_single_resources(
+    email: str,
+    x_admin_token: Optional[str] = Header(default=None),
+):
+    """Tenta GET single em board, list, card, user — pra confirmar se token
+    tem permissão de ler recursos individuais (mesmo sem listar)."""
+    _check_token(x_admin_token)
+    from src.integrations.hablla.client import HabllaClient, HabllaError
+    token = os.getenv("HABLLA_API_TOKEN", "")
+    workspace = os.getenv("HABLLA_WORKSPACE_ID", "")
+    h = HabllaClient(api_token=token, workspace_id=workspace)
+    out: dict = {}
+    try:
+        person = await h.search_person_by_email(email)
+        if not person:
+            return {"error": "email não encontrado"}
+        person_id = str(person.get("id") or "")
+        cards = (await h.list_cards(person_id=person_id, limit=1)).get("results", [])
+        if not cards:
+            return {"error": "sem card"}
+        card = cards[0]
+        card_id = str(card.get("id") or "")
+        board_id = str(card.get("board") or card.get("board_id") or "")
+        list_id = str(card.get("list") or card.get("list_id") or "")
+        user_id = str(card.get("user") or card.get("user_id") or "")
+        out["ids"] = {"card_id": card_id, "board_id": board_id, "list_id": list_id, "user_id": user_id}
+        attempts = [
+            ("v1", f"boards/{board_id}", "board"),
+            ("v2", f"boards/{board_id}", "board"),
+            ("v1", f"lists/{list_id}", "list"),
+            ("v2", f"lists/{list_id}", "list"),
+            ("v1", f"boards/{board_id}/lists/{list_id}", "board>list"),
+            ("v1", f"cards/{card_id}", "card_full"),
+            ("v2", f"cards/{card_id}", "card_full_v2"),
+            ("v1", f"users/{user_id}", "user"),
+            ("v2", f"users/{user_id}", "user_v2"),
+        ]
+        for version, resource, label in attempts:
+            path = h._ws_path(version, resource)
+            try:
+                data = await h._request("GET", path)
+                if isinstance(data, dict):
+                    out[f"{label} ({version})"] = {
+                        "ok": True,
+                        "keys": list(data.keys())[:12],
+                        "name": data.get("name") or data.get("title"),
+                    }
+                else:
+                    out[f"{label} ({version})"] = {"ok": True, "shape": type(data).__name__}
+            except HabllaError as e:
+                out[f"{label} ({version})"] = {"ok": False, "status": e.status_code}
+            except Exception as e:
+                out[f"{label} ({version})"] = {"ok": False, "exc": str(e)[:80]}
+    finally:
+        await h.close()
+    return out
+
+
 @router.get("/hablla/probe-boards")
 async def probe_boards_endpoints(
     x_admin_token: Optional[str] = Header(default=None),
