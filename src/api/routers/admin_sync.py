@@ -82,3 +82,41 @@ async def trigger_hablla_sync_email(
         "error": r.error,
         "fields": _serialize(r.fields),
     }
+
+
+@router.get("/hablla/raw/{email}")
+async def debug_hablla_raw(
+    email: str,
+    x_admin_token: Optional[str] = Header(default=None),
+):
+    """Retorna o JSON cru de person + 1 card + 1 service da Hablla. Apenas
+    pra calibrar o mapeamento — não toca no DB."""
+    _check_token(x_admin_token)
+    from src.integrations.hablla.client import HabllaClient
+    token = os.getenv("HABLLA_API_TOKEN", "")
+    workspace = os.getenv("HABLLA_WORKSPACE_ID", "")
+    if not token or not workspace:
+        raise HTTPException(500, "HABLLA_API_TOKEN/HABLLA_WORKSPACE_ID ausentes")
+
+    h = HabllaClient(api_token=token, workspace_id=workspace)
+    try:
+        person = await h.search_person_by_email(email)
+        if not person:
+            return {"person": None, "note": "email não encontrado no Hablla"}
+        person_id = str(person.get("id") or person.get("_id") or "")
+        cards = (await h.list_cards(person_id=person_id, limit=3)).get("results", [])
+        services = (await h.list_services(person_id=person_id, limit=3)).get("results", [])
+        users = await h.list_users()
+        return {
+            "person_keys": list(person.keys()),
+            "person": person,
+            "cards_count": len(cards),
+            "first_card": cards[0] if cards else None,
+            "first_card_keys": list(cards[0].keys()) if cards else [],
+            "services_count": len(services),
+            "first_service": services[0] if services else None,
+            "first_service_keys": list(services[0].keys()) if services else [],
+            "users_sample": users[:3] if users else [],
+        }
+    finally:
+        await h.close()
