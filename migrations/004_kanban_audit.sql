@@ -12,7 +12,7 @@ ALTER TABLE leads ADD COLUMN IF NOT EXISTS ultima_interacao_em TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS leads_auditoria (
     id BIGSERIAL PRIMARY KEY,
-    lead_id UUID NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+    lead_id INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
     evento TEXT NOT NULL,
     dados_antes JSONB,
     dados_depois JSONB,

@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS mensagens_hablla (
     hablla_message_id VARCHAR(64) UNIQUE,         -- id da mensagem na Hablla
     hablla_service_id VARCHAR(64),                -- id do atendimento/service
     hablla_person_id  VARCHAR(64),                -- id da pessoa
-    lead_id           BIGINT,                     -- FK para leads.id (resolvido por person_id)
+    lead_id           INTEGER,                    -- FK para leads.id (resolvido por person_id)
     canal             VARCHAR(16),                -- whatsapp | email | telegram | instagram | webchat | ...
     direcao           VARCHAR(8),                 -- 'in' (cliente -> BSSP) | 'out' (BSSP -> cliente)
     autor_user_id     VARCHAR(64),                -- user da Hablla que enviou (se direcao=out)
