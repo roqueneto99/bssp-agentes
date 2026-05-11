@@ -2,11 +2,19 @@
 """
 Aplica migrations SQL no banco configurado em DATABASE_URL.
 
-Executado automaticamente pelo Railway no `release` phase (ver Procfile).
-Idempotente — todos os CREATEs usam IF NOT EXISTS.
+Executado pelo Railway via `deploy.preDeployCommand` (railway.json).
+Idempotente — CREATEs usam IF NOT EXISTS.
+
+Variáveis de ambiente:
+    DATABASE_URL              (obrigatória)
+    MIGRATION_MIN_VERSION     (opcional) — pula arquivos com número < N.
+                              Útil pra desbloquear o deploy quando uma
+                              migration antiga tem bug latente e o banco
+                              prod já está num estado avançado.
 
 Uso manual:
     python -m scripts.run_migrations
+    MIGRATION_MIN_VERSION=9 python scripts/run_migrations.py   # só >= 009
 """
 
 from __future__ import annotations
@@ -14,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -29,6 +38,12 @@ logging.basicConfig(
 logger = logging.getLogger("migrations")
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
+MIN_VERSION = int(os.getenv("MIGRATION_MIN_VERSION", "0"))
+
+
+def _version_of(path: Path) -> int:
+    m = re.match(r"^(\d+)", path.name)
+    return int(m.group(1)) if m else 0
 
 
 async def _apply_one(sql_path: Path) -> None:
@@ -40,9 +55,7 @@ async def _apply_one(sql_path: Path) -> None:
         logger.warning("DATABASE_URL ausente — pulando migrations.")
         return
 
-    # asyncpg não aceita o prefixo +asyncpg; normalizar.
     dsn = url.replace("postgresql+asyncpg://", "postgresql://")
-
     sql = sql_path.read_text(encoding="utf-8")
     conn = await asyncpg.connect(dsn)
     try:
@@ -63,14 +76,21 @@ async def main() -> int:
         logger.info("Nenhum arquivo .sql em migrations/.")
         return 0
 
+    skipped = 0
+    applied = 0
     for f in files:
+        if _version_of(f) < MIN_VERSION:
+            logger.info(f"Pulando {f.name} (versão < MIGRATION_MIN_VERSION={MIN_VERSION})")
+            skipped += 1
+            continue
         try:
             await _apply_one(f)
+            applied += 1
         except Exception as exc:  # noqa: BLE001
             logger.exception(f"Falha na migration {f.name}: {exc}")
             return 1
 
-    logger.info(f"{len(files)} migration(s) aplicada(s) com sucesso.")
+    logger.info(f"Migrations: {applied} aplicada(s), {skipped} pulada(s).")
     return 0
 
 
