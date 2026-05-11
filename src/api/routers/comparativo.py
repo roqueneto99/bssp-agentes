@@ -132,7 +132,12 @@ SQL_LIST = text("""
             LOWER(COALESCE(l.name, h.name, ''))  LIKE :qlike
          OR LOWER(COALESCE(l.email, h.email, '')) LIKE :qlike
        ))
-       AND (NOT :only_updated_24h OR c.updated_in_last_24h)
+       AND (
+            :since_date IS NOT NULL
+              AND (l.updated_at >= :since_dt OR h.last_seen_at >= :since_dt)
+            OR (:since_date IS NULL
+                AND (NOT :only_updated_24h OR c.updated_in_last_24h))
+       )
      ORDER BY c.updated_in_last_24h DESC,
               c.bucket,
               COALESCE(l.email, h.email)
@@ -157,7 +162,12 @@ SQL_COUNT = text("""
             LOWER(COALESCE(l.name, h.name, ''))  LIKE :qlike
          OR LOWER(COALESCE(l.email, h.email, '')) LIKE :qlike
        ))
-       AND (NOT :only_updated_24h OR c.updated_in_last_24h)
+       AND (
+            :since_date IS NOT NULL
+              AND (l.updated_at >= :since_dt OR h.last_seen_at >= :since_dt)
+            OR (:since_date IS NULL
+                AND (NOT :only_updated_24h OR c.updated_in_last_24h))
+       )
 """)
 
 SQL_DETAIL = text("""
@@ -210,16 +220,20 @@ async def itens(
     dim: Optional[Dim] = None,
     q: Optional[str] = Query(None, min_length=2),
     only_updated_24h: bool = Query(False),
+    since: Optional[date] = Query(None, description="Mostra leads tocados desde YYYY-MM-DD"),
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=200),
 ):
     snap = date_ or _today_brt()
     qlike = f"%{q.lower()}%" if q else "%"
+    since_dt = datetime.combine(since, datetime.min.time(), tzinfo=TZ_BRT) if since else None
     params = {
         "snapshot_date": snap,
         "bucket": bucket, "dim": dim,
         "q": q, "qlike": qlike,
         "only_updated_24h": only_updated_24h,
+        "since_date": since,
+        "since_dt": since_dt,
         "limit": size, "offset": (page - 1) * size,
     }
     async with get_session() as session:
@@ -261,3 +275,35 @@ async def rerun(date_: Optional[date] = Query(None, alias="date")):
     snap = date_ or _today_brt()
     summary = await run_daily_comparison(snapshot_date=snap, dry_run=False)
     return summary
+
+
+@router.post("/backfill")
+async def backfill(
+    from_: date = Query(..., alias="from", description="Data inicial (inclusiva)"),
+    to: Optional[date] = Query(None, description="Data final (inclusiva). Default: hoje BRT"),
+):
+    """
+    Gera snapshots retroativos de [from..to]. NÃO bloqueia — roda síncrono.
+
+    Limitação: cada snapshot usa o estado ATUAL do banco; a flag
+    `updated_in_last_24h` é calculada com a janela 24h do dia X (usando
+    leads.updated_at). Leads deletados depois não aparecem nos dias antigos.
+    """
+    from src.sync.lead_comparison import run_daily_comparison
+    end = to or _today_brt()
+    if from_ > end:
+        raise HTTPException(400, "from > to")
+    days = (end - from_).days + 1
+    if days > 120:
+        raise HTTPException(400, f"backfill de {days} dias — máx 120 por request")
+
+    snapshots: list[dict] = []
+    cur = from_
+    while cur <= end:
+        s = await run_daily_comparison(snapshot_date=cur, dry_run=False)
+        snapshots.append({"date": cur.isoformat(),
+                          "total": s["total"],
+                          "matched_divergent": s["matched_divergent"]})
+        cur += timedelta(days=1)
+    return {"from": from_.isoformat(), "to": end.isoformat(),
+            "days": days, "snapshots": snapshots}

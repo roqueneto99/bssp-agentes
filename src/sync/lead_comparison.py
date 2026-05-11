@@ -390,7 +390,11 @@ async def run_daily_comparison(
 ) -> dict:
     if snapshot_date is None:
         snapshot_date = datetime.now(TZ_BRT).date()
-    cutoff_24h = datetime.now(TZ_BRT) - timedelta(hours=24)
+        cutoff_24h = datetime.now(TZ_BRT) - timedelta(hours=24)
+    else:
+        # Snapshot retroativo: cutoff = fim do dia X em BRT − 24h
+        end_of_day = datetime.combine(snapshot_date, datetime.max.time(), tzinfo=TZ_BRT)
+        cutoff_24h = end_of_day - timedelta(hours=24)
 
     async with get_session() as session:
         rd_rows = (await session.execute(SQL_FETCH_RD)).mappings().all()
