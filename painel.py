@@ -44,7 +44,7 @@ from src.database.queries_squad3 import MensagensRepository, NullMensagensRepo
 from src.webhooks import sendgrid_receiver as sendgrid_webhook
 from src.webhooks import hablla_receiver as hablla_webhook
 from src.orquestrador import run as run_orquestrador
-from src.api.routers import leads_pipeline, leads_summary, admin_sync, conversas
+from src.api.routers import leads_pipeline, leads_summary, admin_sync, conversas, comparativo
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 logger = logging.getLogger("painel")
@@ -201,6 +201,7 @@ app.include_router(leads_summary.router)
 app.include_router(leads_pipeline.router)
 app.include_router(conversas.router)
 app.include_router(admin_sync.router)
+app.include_router(comparativo.router)
 
 
 @app.on_event("startup")
