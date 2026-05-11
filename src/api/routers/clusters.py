@@ -15,7 +15,10 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+import logging
+
+logger = logging.getLogger("clusters")
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -75,18 +78,38 @@ class LeadInCluster(BaseModel):
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
-@router.post("/run")
-async def run_analysis(
-    since: Optional[date] = Query(None, description="Data inicial (default: sem filtro)"),
-    dry_run: bool = Query(False),
-):
-    """Roda uma nova análise de clusterização. Pode demorar 30s–2min."""
+async def _cluster_worker(since: Optional[date], dry_run: bool) -> None:
     from src.analytics.cluster_lost_leads import run_cluster_analysis
     try:
         result = await run_cluster_analysis(since_date=since, dry_run=dry_run)
-    except Exception as e:
-        raise HTTPException(500, f"Falha na análise: {e}")
-    return result
+        logger.info("clusterização OK: %s", result.get("status"))
+    except Exception:
+        logger.exception("clusterização falhou (since=%s)", since)
+
+
+@router.post("/run", status_code=202)
+async def run_analysis(
+    bg: BackgroundTasks,
+    since: Optional[date] = Query(None, description="Data inicial (default: sem filtro)"),
+    dry_run: bool = Query(False),
+    sync: bool = Query(False, description="Se true, roda síncrono (debug)"),
+):
+    """
+    Inicia clusterização em BACKGROUND (default). Retorna 202.
+    Pra debug, passe ?sync=true e aguarde 30s–2min.
+    """
+    if sync:
+        from src.analytics.cluster_lost_leads import run_cluster_analysis
+        try:
+            return await run_cluster_analysis(since_date=since, dry_run=dry_run)
+        except Exception as e:
+            raise HTTPException(500, f"Falha na análise: {e}")
+    bg.add_task(_cluster_worker, since, dry_run)
+    return {
+        "status": "started",
+        "since": since.isoformat() if since else None,
+        "message": "Análise rodando em background. Recarregue em 1-3min.",
+    }
 
 
 @router.get("/runs", response_model=list[RunSummary])

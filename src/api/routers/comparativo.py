@@ -29,7 +29,10 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from typing import Literal, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+import logging
+
+logger = logging.getLogger("comparativo")
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -277,19 +280,37 @@ async def rerun(date_: Optional[date] = Query(None, alias="date")):
     return summary
 
 
-@router.post("/backfill")
+async def _backfill_worker(from_: date, to: date) -> None:
+    """Roda backfill em background — sem bloquear o request."""
+    from src.sync.lead_comparison import run_daily_comparison
+    cur = from_
+    while cur <= to:
+        try:
+            s = await run_daily_comparison(snapshot_date=cur, dry_run=False)
+            logger.info("backfill %s OK: total=%s divergentes=%s",
+                        cur, s.get("total"), s.get("matched_divergent"))
+        except Exception:
+            logger.exception("backfill %s falhou", cur)
+        cur += timedelta(days=1)
+
+
+@router.post("/backfill", status_code=202)
 async def backfill(
+    bg: BackgroundTasks,
     from_: date = Query(..., alias="from", description="Data inicial (inclusiva)"),
     to: Optional[date] = Query(None, description="Data final (inclusiva). Default: hoje BRT"),
 ):
     """
-    Gera snapshots retroativos de [from..to]. NÃO bloqueia — roda síncrono.
+    Gera snapshots retroativos de [from..to] em BACKGROUND.
+
+    Retorna 202 imediatamente. O processamento pode levar alguns minutos
+    (varia por número de dias × tamanho da base). Recarregue a página em
+    1-3 minutos pra ver os snapshots aparecendo.
 
     Limitação: cada snapshot usa o estado ATUAL do banco; a flag
     `updated_in_last_24h` é calculada com a janela 24h do dia X (usando
     leads.updated_at). Leads deletados depois não aparecem nos dias antigos.
     """
-    from src.sync.lead_comparison import run_daily_comparison
     end = to or _today_brt()
     if from_ > end:
         raise HTTPException(400, "from > to")
@@ -297,13 +318,11 @@ async def backfill(
     if days > 120:
         raise HTTPException(400, f"backfill de {days} dias — máx 120 por request")
 
-    snapshots: list[dict] = []
-    cur = from_
-    while cur <= end:
-        s = await run_daily_comparison(snapshot_date=cur, dry_run=False)
-        snapshots.append({"date": cur.isoformat(),
-                          "total": s["total"],
-                          "matched_divergent": s["matched_divergent"]})
-        cur += timedelta(days=1)
-    return {"from": from_.isoformat(), "to": end.isoformat(),
-            "days": days, "snapshots": snapshots}
+    bg.add_task(_backfill_worker, from_, end)
+    return {
+        "status": "started",
+        "from": from_.isoformat(),
+        "to": end.isoformat(),
+        "days": days,
+        "message": "Backfill rodando em background. Recarregue em alguns minutos.",
+    }
