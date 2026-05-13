@@ -272,6 +272,30 @@ class RDStationClient:
         )
         return Contact.from_api_response(data)
 
+    async def get_contact_raw(
+        self,
+        email: Optional[str] = None,
+        uuid: Optional[str] = None,
+    ) -> dict:
+        """
+        Igual ao get_contact, mas devolve o dict bruto da API ao inves do
+        dataclass Contact. Util para o sync, que precisa preservar campos
+        que Contact filtra (lifecycle_stage, fit_score, interest_score,
+        first_conversion_date, etc.).
+        """
+        if email:
+            identifier, value = "email", email
+        elif uuid:
+            identifier, value = "uuid", uuid
+        else:
+            raise ValueError("Informe email ou uuid")
+
+        return await self._request(
+            "GET",
+            f"/platform/contacts/{identifier}:{value}",
+            rate_limit_resource="contacts_account",
+        )
+
     async def create_contact(self, contact: Contact) -> Contact:
         """
         Cria um contato novo. Falha se email já existe.

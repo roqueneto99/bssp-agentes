@@ -49,6 +49,14 @@ PAGE_SIZE = 125  # Máximo da API de segmentação
 BATCH_SIZE = 20  # Páginas em paralelo por batch
 MAX_UPSERT_BATCH = 500  # Leads por batch de upsert no PostgreSQL
 
+# Hidratação: a API /segmentations/contacts retorna versao MINIMAL (6 chaves).
+# Para preencher personal_phone, mobile_phone, company_name, city, state,
+# country, linkedin, job_title, lifecycle_stage, fit_score, interest_score,
+# first_conversion_date, tags — fazemos uma chamada extra a /contacts/uuid:{uuid}
+# por lead. Aplicado SO no incremental (full_sync ficaria ~51h pra 369k leads).
+HYDRATE_NEW_LEADS = os.getenv("HYDRATE_NEW_LEADS", "true").lower() in ("1","true","yes")
+HYDRATE_CONCURRENCY = int(os.getenv("HYDRATE_CONCURRENCY", "5"))
+
 
 def _parse_dt(value: Optional[str]) -> Optional[datetime]:
     """Converte string ISO para datetime, retorna None se inválido."""
@@ -139,6 +147,48 @@ async def _upsert_leads(session, leads_data: list[dict]) -> tuple[int, int]:
     # mas o total afetado = novos + atualizados
     affected = result.rowcount if result.rowcount else len(valid)
     return affected, 0  # Sem como distinguir precisamente
+
+
+async def _hydrate_contacts(rd: RDStationClient, contacts: list[dict]) -> list[dict]:
+    """Enriquece a lista de contatos minimais (da API de segmentacao) com a
+    versao completa de cada um (via /platform/contacts/uuid:{uuid}).
+
+    A API de segmentacao retorna so 6 chaves (uuid, email, name, links,
+    created_at, last_conversion_date). Para popular personal_phone, mobile,
+    company, city, state, country, linkedin, job_title, lifecycle_stage,
+    fit_score, interest_score, first_conversion_date e tags — precisamos
+    bater no endpoint de detalhe.
+
+    Concorrência limitada via HYDRATE_CONCURRENCY (default 5). Falhas
+    individuais sao logadas e o contato minimal e retornado como esta —
+    sync nao quebra por causa de hidratacao.
+    """
+    if not HYDRATE_NEW_LEADS or not contacts:
+        return contacts
+
+    sem = asyncio.Semaphore(HYDRATE_CONCURRENCY)
+
+    async def hydrate_one(c: dict) -> dict:
+        uuid = c.get("uuid")
+        if not uuid:
+            return c
+        async with sem:
+            try:
+                full = await rd.get_contact_raw(uuid=uuid)
+            except Exception as e:
+                logger.warning("hydrate: falha em uuid=%s: %s", uuid, e)
+                return c
+        # Merge: tudo do full vence, exceto chaves vazias/None — fallback pro
+        # minimal. Garante que campos como created_at, last_conversion_date
+        # do minimal não sejam perdidos se o detail por acaso não os trouxer.
+        merged = dict(c)
+        for k, v in (full or {}).items():
+            if v is None or v == "" or v == []:
+                continue
+            merged[k] = v
+        return merged
+
+    return await asyncio.gather(*(hydrate_one(c) for c in contacts))
 
 
 async def _fetch_page(rd: RDStationClient, seg_id: int, page: int) -> list[dict]:
@@ -386,7 +436,7 @@ async def incremental_sync(
             stats["total_pages"] = page
 
             # Filtrar: manter apenas leads com last_conversion_date >= cutoff
-            batch_leads = []
+            recent: list[dict] = []
             for c in contacts:
                 lcd = c.get("last_conversion_date", "")
                 if lcd and lcd < cutoff_str:
@@ -394,7 +444,17 @@ async def incremental_sync(
                     # então se encontramos um anterior ao cutoff, paramos
                     keep_going = False
                     break
-                batch_leads.append(_contact_to_lead_dict(c))
+                recent.append(c)
+
+            # Hidrata só os recentes (1 chamada extra ao RD por lead) — o
+            # endpoint /segmentations/contacts traz versão minimal; o detalhe
+            # tem phone, company, city, state, lifecycle_stage etc.
+            if recent and HYDRATE_NEW_LEADS:
+                try:
+                    recent = await _hydrate_contacts(rd, recent)
+                except Exception as e:
+                    logger.warning("hydrate falhou na página %d: %s — seguindo com minimal", page, e)
+            batch_leads = [_contact_to_lead_dict(c) for c in recent]
 
             if batch_leads:
                 async with get_session() as session:
