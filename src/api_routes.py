@@ -29,7 +29,7 @@ def init_agent(rdstation: RDStationClient):
     _llm = LLMProvider(
         provider="anthropic",
         api_key=os.getenv("LLM_API_KEY", ""),
-        model=os.getenv("LLM_MODEL", "claude-sonnet-4-20250514"),
+        model=os.getenv("LLM_MODEL", "claude-haiku-4-5-20251001"),
     )
     _agent = EnrichmentAgent(llm=_llm, rdstation=_rdstation)
 

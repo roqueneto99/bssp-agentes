@@ -130,6 +130,11 @@ _SEGS_LIST_TTL = 600  # 10 minutos
 # ao RD Station, sem depender de cron externo. Painel.py roda 24/7 no Railway,
 # entao um loop interno eh suficiente.
 SYNC_AUTO_ENABLED = os.getenv("SYNC_AUTO_ENABLED", "true").lower() in ("1", "true", "yes")
+# AUTO-SCORING: dispara o orquestrador (Squad 1+2, chamadas ao LLM = custo) apos
+# cada sync. Default OFF para evitar custo recorrente -- o scoring roda sob demanda
+# via POST /api/orquestrador/run (botao do painel). O sync de DADOS (RD/Hablla ->
+# Postgres) continua automatico normalmente, pois nao usa LLM e nao tem custo.
+AUTO_SCORING_ENABLED = os.getenv("AUTO_SCORING_ENABLED", "false").lower() in ("1", "true", "yes")
 SYNC_INTERVAL_HOURS = int(os.getenv("SYNC_INTERVAL_HOURS", "4"))
 # Janela maior que o intervalo da uma margem de seguranca (caso uma execucao
 # atrase ou falhe, a proxima ainda cobre o gap).
@@ -142,6 +147,7 @@ _sync_lock = asyncio.Lock()
 _sync_task: Optional[asyncio.Task] = None
 _sync_status: dict = {
     "auto_enabled": SYNC_AUTO_ENABLED,
+    "auto_scoring_enabled": AUTO_SCORING_ENABLED,
     "interval_hours": SYNC_INTERVAL_HOURS,
     "hours_window": SYNC_HOURS_WINDOW,
     "full_weekday_utc": SYNC_FULL_WEEKDAY_UTC,
@@ -239,7 +245,7 @@ async def startup():
     llm = LLMProvider(
         provider="anthropic",
         api_key=llm_key or "dummy",
-        model="claude-sonnet-4-20250514",
+        model=os.getenv("LLM_MODEL", "claude-haiku-4-5-20251001"),
         temperature=0.2,
     )
     if not llm_key:
@@ -1161,7 +1167,14 @@ async def _auto_sync_loop():
             # AUTO-SCORING: dispara orquestrador (Squad 1+2) após cada sync
             # incremental para classificar leads novos/atualizados. Idempotente:
             # respeita a trava `running` em _orquestrador_status.
-            if not _orquestrador_status["running"]:
+            # Default OFF (AUTO_SCORING_ENABLED): scoring usa LLM e tem custo;
+            # rode sob demanda via POST /api/orquestrador/run.
+            if not AUTO_SCORING_ENABLED:
+                logger.info(
+                    "auto-scoring pulado: AUTO_SCORING_ENABLED=false "
+                    "(scoring roda sob demanda via /api/orquestrador/run)"
+                )
+            elif not _orquestrador_status["running"]:
                 _max_leads = int(os.getenv("AUTO_SCORING_MAX_LEADS", "30"))
                 _run_id = f"autosync-{_uuid.uuid4().hex[:8]}"
                 try:

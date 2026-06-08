@@ -6,7 +6,7 @@ outro provider sem alterar a lógica dos agentes.
 
 Uso:
     # Com Claude
-    provider = LLMProvider(provider="anthropic", api_key="...", model="claude-sonnet-4-20250514")
+    provider = LLMProvider(provider="anthropic", api_key="...", model="claude-haiku-4-5-20251001")
 
     # Com OpenAI
     provider = LLMProvider(provider="openai", api_key="...", model="gpt-4o-mini")
@@ -77,7 +77,7 @@ class LLMProvider:
         # Defaults por provider
         if not model:
             if self.provider_type == LLMProviderType.ANTHROPIC:
-                self.model = "claude-sonnet-4-20250514"
+                self.model = "claude-haiku-4-5-20251001"
             else:
                 self.model = "gpt-4o-mini"
         else:
